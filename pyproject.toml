@@ -1,0 +1,15 @@
+[project]
+name = "chronicle"
+version = "0.1.0"
+description = "Hook-triggered persistent session knowledge tracker for Claude Code"
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[project.scripts]
+chronicle = "chronicle.__main__:main"
+chronicle-hook = "chronicle.hook:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
