@@ -1,0 +1,9 @@
+[project]
+name = "chronicle"
+version = "0.6.0"
+description = "Hook-triggered persistent session knowledge tracker for Claude Code"
+requires-python = ">=3.10"
+
+[project.scripts]
+chronicle = "chronicle.__main__:main"
+chronicle-hook = "chronicle.hook:main"

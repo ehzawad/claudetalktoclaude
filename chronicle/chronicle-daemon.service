@@ -1,0 +1,13 @@
+[Unit]
+Description=Decision Chronicle Daemon
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+ExecStart=%h/.local/bin/chronicle daemon
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
