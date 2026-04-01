@@ -1,7 +1,6 @@
 """Call Claude (via `claude -p`) to summarize session content into decisions.
 
-Uses `claude -p --model <model> --bare` for summarization via your subscription.
-The --bare flag prevents recursive hooks from firing on the observer Claude.
+Uses `claude -p --model <model>` for summarization via your subscription.
 
 Provides `async_summarize_session()` for parallel processing of multiple sessions.
 """
@@ -340,7 +339,7 @@ async def async_summarize_session(digest: SessionDigest) -> ChronicleEntry:
     try:
         proc = await asyncio.create_subprocess_exec(
             "claude", "-p", "--model", model,
-            "--output-format", "json", "--bare",
+            "--output-format", "json",
             "--no-session-persistence",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
