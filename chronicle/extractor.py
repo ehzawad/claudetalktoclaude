@@ -404,6 +404,16 @@ def extract_session(jsonl_path: str) -> SessionDigest:
                 ))
 
     digest.total_turns = len(digest.timeline)
+
+    # Fallback: derive timestamps from file mtime when JSONL has none
+    if not digest.start_time:
+        from datetime import datetime, timezone
+        mtime = path.stat().st_mtime
+        iso = datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        digest.start_time = iso
+        if not digest.end_time:
+            digest.end_time = iso
+
     return digest
 
 

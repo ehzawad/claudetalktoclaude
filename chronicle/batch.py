@@ -13,7 +13,10 @@ Usage:
 import argparse
 import asyncio
 import os
+import signal
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 from .config import CHRONICLE_DIR, load_config, save_default_config
@@ -23,6 +26,7 @@ from .filtering import should_skip
 from .storage import (
     mark_chronicled,
     write_session_record, append_to_chronicle, session_filename,
+    rebuild_prompts_section,
 )
 from .summarizer import async_summarize_session
 
@@ -61,7 +65,6 @@ async def _process_one(digest, semaphore):
         project_name = parts[-1] if parts else digest.project_slug
         print(f"  [{project_name}/{sid}] starting ({turns} turns, {len(digest.user_prompts)} prompts)...")
 
-        import time
         start = time.time()
 
         # Run summarization with periodic progress dots
@@ -156,7 +159,7 @@ async def async_batch_process(
     # Sort by start_time so chronicle.md entries are chronological
     eligible.sort(key=lambda d: d.start_time)
 
-    # Phase 2: Summarize in parallel
+    # Phase 2: Summarize in parallel — every session goes through the LLM
     print(f"Processing {len(eligible)} sessions with {workers} workers...\n")
     semaphore = asyncio.Semaphore(workers)
     tasks = [_process_one(digest, semaphore) for digest in eligible]
@@ -164,7 +167,6 @@ async def async_batch_process(
 
     # Phase 3: Write results (sync, fast — chronological order preserved)
     process_count = 0
-    no_decisions = 0
     error_count = 0
 
     for digest, result in zip(eligible, results):
@@ -179,11 +181,7 @@ async def async_batch_process(
             error_count += 1
             continue
 
-        if entry.is_empty:
-            no_decisions += 1
-            mark_chronicled(digest.session_id, digest.end_time)
-            continue
-
+        # Every session gets a record — even empty ones
         write_session_record(entry, digest.project_slug)
         append_to_chronicle(entry, digest.project_slug)
         mark_chronicled(digest.session_id, digest.end_time)
@@ -193,11 +191,22 @@ async def async_batch_process(
         full_path = project_chronicle_dir(digest.project_slug) / "sessions" / session_filename(entry)
         print(f"  -> vim {full_path}")
 
+    # Rebuild combined prompts section and show chronicle.md path
+    if process_count:
+        from .config import project_chronicle_dir
+        projects_done = sorted(set(d.project_slug for d in eligible))
+        print()
+        for slug in projects_done:
+            rebuild_prompts_section(slug)
+            chronicle_path = project_chronicle_dir(slug) / "chronicle.md"
+            if chronicle_path.exists():
+                lines = sum(1 for _ in open(chronicle_path))
+                print(f"  Chronicle: vim {chronicle_path} ({lines} lines)")
+
     print(f"\nSummary:")
     print(f"  Processed: {process_count}")
-    print(f"  Skipped (too short): {skip_count}")
+    print(f"  Skipped: {skip_count}")
     print(f"  Already chronicled: {already_done}")
-    print(f"  No decisions: {no_decisions}")
     if error_count:
         print(f"  Errors: {error_count}")
 
@@ -220,11 +229,9 @@ def main():
     daemon_was_running = False
     running, pid = _is_running()
     if running and not args.dry_run:
-        import signal
         os.kill(pid, signal.SIGTERM)
         daemon_was_running = True
         print(f"Stopped daemon (pid {pid}) to avoid duplicate processing.")
-        import time
         time.sleep(1)  # let it shut down
 
     try:
@@ -241,13 +248,12 @@ def main():
         sys.exit(1)
     finally:
         if daemon_was_running and not args.dry_run:
-            import subprocess as _sp
             log_file = CHRONICLE_DIR / "daemon.log"
             with open(log_file, "a") as log_fd:
-                _sp.Popen(
+                subprocess.Popen(
                     [sys.executable, "-m", "chronicle.daemon"],
                     start_new_session=True,
-                    stdin=_sp.DEVNULL,
+                    stdin=subprocess.DEVNULL,
                     stdout=log_fd,
                     stderr=log_fd,
                 )

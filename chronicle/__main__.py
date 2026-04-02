@@ -7,6 +7,7 @@ Usage:
     chronicle query projects
     chronicle query timeline [--limit N]
     chronicle query search "term"
+    chronicle rewind [N] [--since N] [--summary N] [--diff N]
     chronicle install-daemon
     chronicle reload
 """
@@ -37,6 +38,9 @@ def main():
     elif command == "query":
         from .query import main as query_main
         query_main()
+    elif command == "rewind":
+        from .rewind import main as rewind_main
+        rewind_main()
     elif command == "install-daemon":
         install_daemon()
     elif command == "reload":

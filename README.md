@@ -13,8 +13,8 @@ You spend time planning: architecture decisions, stack choices, testing strategi
 Nothing changes about your workflow. Work as usual, close the session.
 
 1. **Hooks fire** on every prompt, response, and session end — logging events
-2. **A background daemon** waits until all sessions are quiet for 5 minutes, then summarizes each session via `claude -p --bare` (uses your subscription tokens)
-3. **A markdown file** appears per session with turn-by-turn log, decisions, narrative, problems solved, and more
+2. **A background daemon** waits until all sessions are quiet for 5 minutes, then summarizes each session via `claude -p` (uses your subscription)
+3. **One chronicle.md per project** — full session content stacked chronologically with a timeline table at top, plus individual session files
 4. **Next session** gets past decisions injected as context automatically
 
 ### Event capture
@@ -65,7 +65,7 @@ Nothing changes about your workflow. Work as usual, close the session.
   │  │ 1. Read JSONL   │  │     ~/.claude/projects/<slug>/<id>.jsonl
   │  │ 2. Parse turns  │  │     Extract user/assistant/tool timeline
   │  │ 3. Redact       │  │     API keys, tokens, PEM, JWTs, .env
-  │  │ 4. Summarize    │  │     claude -p --model opus --bare
+  │  │ 4. Summarize    │  │     claude -p --model opus
   │  │ 5. Return entry │  │     Returns (digest, entry) tuple
   │  └─────────────────┘  │
   └──────────┬────────────┘
@@ -130,7 +130,7 @@ Nothing changes about your workflow. Work as usual, close the session.
 - **macOS or Linux** (Windows: use WSL)
 - **Python 3.10+** (`python3 --version`)
 - **Claude Code CLI** (`claude --version`)
-- **Any Claude Code subscription** (summarization uses `claude -p --bare`, counts against your plan's token usage)
+- **Any Claude Code subscription** (summarization uses `claude -p`, counts against your plan's token usage)
 
 ## Install
 
@@ -207,6 +207,14 @@ chronicle query timeline              # recent sessions
 chronicle query search "auth"         # full-text search
 chronicle query myproject             # shorthand — show a project by name
 
+# Rewind — navigate session history like Claude Code's /rewind
+chronicle rewind                      # numbered session list for current project
+chronicle rewind 3                    # view session #3's full details
+chronicle rewind --since 2            # show sessions #2 through latest
+chronicle rewind --diff 3             # what was NEW in session #3 vs prior
+chronicle rewind --summary 2          # AI-summarize sessions #2 through latest
+chronicle rewind --project myproject  # target a different project
+
 # Version
 chronicle --version
 
@@ -255,7 +263,7 @@ Without `--force`, already-processed sessions are skipped. Use `--force` only af
 |-----|---------|-------------|
 | `model` | `"opus"` | Model for summarization |
 | `concurrency` | `5` | Parallel workers |
-| `min_turns_to_chronicle` | `1` | Skip sessions shorter than this |
+| `max_retries` | `3` | Give up on a session after N failed summarization attempts |
 | `poll_interval_seconds` | `5` | Daemon poll interval |
 | `quiet_minutes` | `5` | Global debounce — minutes of silence before processing |
 | `max_retries` | `3` | Give up on a session after this many failed attempts |
@@ -301,7 +309,7 @@ Claude Code behaves exactly the same with or without chronicle installed.
 
 ## Caveats
 
-- **Uses your subscription tokens** — each session summarization is one `claude -p` call (no `--bare` flag — removed in v0.2.0 due to OAuth credential issues in CLI 2.1.89+), comparable to sending a long message. Cost is minimal — a few sessions a day is negligible on any plan. No separate API key or billing needed.
+- **Uses your subscription** — each session summarization is one `claude -p` call, comparable to sending a long message. Cost is minimal — a few sessions a day is negligible on any plan. No separate API key or billing needed.
 - **Global debounce** — daemon waits until ALL sessions across ALL projects are quiet for 5 minutes before processing anything
 - **Daemon auto-spawns** on SessionStart, auto-stops/restarts around `chronicle batch`
 - **Transient failures retry** — rate limits don't mark sessions as done, gives up after `max_retries` attempts

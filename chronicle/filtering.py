@@ -12,16 +12,12 @@ def should_skip(digest, config: dict, force: bool = False) -> str | None:
     """Check if a session should be skipped. Returns reason string or None.
 
     Used by both the daemon (real-time) and batch (retroactive) pipelines
-    to apply consistent filtering.
+    to apply consistent filtering. Short/empty sessions are NOT skipped —
+    they get lightweight records to match Claude Code's session list.
     """
-    min_turns = config.get("min_turns_to_chronicle", 1)
-    if digest.total_turns < min_turns:
-        return f"only {digest.total_turns} turns"
-
-    if not digest.user_prompts:
-        return "no user prompts"
-
-    if any(digest.user_prompts[0].text.startswith(m) for m in _SELF_SESSION_MARKERS):
+    if digest.user_prompts and any(
+        digest.user_prompts[0].text.startswith(m) for m in _SELF_SESSION_MARKERS
+    ):
         return "chronicle self-session"
 
     skip_projects = config.get("skip_projects", [])

@@ -18,7 +18,7 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config import CHRONICLE_DIR, PROJECTS_DIR, PID_FILE, EVENTS_FILE
+from .config import CHRONICLE_DIR, PID_FILE, EVENTS_FILE, load_recent_titles
 
 _MAX_ERROR_LOG_BYTES = 1_000_000  # ~1MB cap
 
@@ -49,25 +49,6 @@ def _spawn_daemon():
         )
 
 
-def _load_recent_titles(cwd: str, max_entries: int = 10) -> list[str]:
-    """Read recent session titles from this project's chronicle."""
-    slug = cwd.replace("/", "-")
-    sessions_dir = PROJECTS_DIR / slug / "sessions"
-    if not sessions_dir.exists():
-        return []
-
-    titles = []
-    for md_file in sorted(sessions_dir.glob("*.md"), reverse=True)[:max_entries]:
-        try:
-            with open(md_file, errors="ignore") as f:
-                first_line = f.readline().rstrip("\n")
-            if first_line.startswith("# "):
-                titles.append(first_line[2:])
-        except Exception:
-            continue
-    return titles
-
-
 def main():
     try:
         CHRONICLE_DIR.mkdir(parents=True, exist_ok=True)
@@ -92,7 +73,8 @@ def main():
             # Inject recent decisions into the session
             cwd = data.get("cwd", "")
             if cwd:
-                titles = _load_recent_titles(cwd)
+                slug = cwd.replace("/", "-")
+                titles = load_recent_titles(slug)
                 if titles:
                     context = (
                         "Previous sessions in this project (from Decision Chronicle):\n"

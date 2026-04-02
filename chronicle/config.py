@@ -14,7 +14,6 @@ CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 DEFAULT_CONFIG = {
     "concurrency": 5,
-    "min_turns_to_chronicle": 1,
     "model": "opus",
     "poll_interval_seconds": 5,
     "quiet_minutes": 5,
@@ -55,3 +54,21 @@ def ensure_dirs(slug: str):
     sessions_dir.mkdir(exist_ok=True)
     if sessions_created:
         os.chmod(sessions_dir, 0o700)
+
+
+def load_recent_titles(project_slug: str, max_entries: int = 10) -> list[str]:
+    """Read recent session titles from a project's chronicle sessions dir."""
+    sessions_dir = PROJECTS_DIR / project_slug / "sessions"
+    if not sessions_dir.exists():
+        return []
+
+    titles = []
+    for md_file in sorted(sessions_dir.glob("*.md"), reverse=True)[:max_entries]:
+        try:
+            with open(md_file, errors="ignore") as f:
+                first_line = f.readline().rstrip("\n")
+            if first_line.startswith("# "):
+                titles.append(first_line[2:])
+        except Exception:
+            continue
+    return titles

@@ -293,25 +293,6 @@ def _parse_claude_response(stdout: str, entry: ChronicleEntry) -> ChronicleEntry
     return entry
 
 
-def _load_recent_titles(project_slug: str, max_entries: int = 5) -> list[str]:
-    """Read recent session titles from this project's chronicle."""
-    from .config import PROJECTS_DIR
-    sessions_dir = PROJECTS_DIR / project_slug / "sessions"
-    if not sessions_dir.exists():
-        return []
-
-    titles = []
-    for md_file in sorted(sessions_dir.glob("*.md"), reverse=True)[:max_entries]:
-        try:
-            with open(md_file, errors="ignore") as f:
-                first_line = f.readline().rstrip("\n")
-            if first_line.startswith("# "):
-                titles.append(first_line[2:])
-        except Exception:
-            continue
-    return titles
-
-
 async def async_summarize_session(digest: SessionDigest) -> ChronicleEntry:
     """One-shot summarization via claude -p. No session persistence — clean resume picker.
 
@@ -322,19 +303,25 @@ async def async_summarize_session(digest: SessionDigest) -> ChronicleEntry:
     config = load_config()
     model = config.get("model", "opus")
 
+    entry = _make_entry(digest)
+
+    # Sessions with no actual content — return empty entry directly
+    if not digest.timeline and not digest.user_prompts:
+        entry.is_empty = True
+        entry.title = f"Session {digest.session_id[:8]}"
+        return entry
+
     transcript = digest_to_text(digest)
     base_prompt = SUMMARIZATION_PROMPT.format(transcript=transcript)
 
-    # Add recent decisions for cross-referencing context
-    titles = _load_recent_titles(digest.project_slug)
+    from .config import load_recent_titles
+    titles = load_recent_titles(digest.project_slug, max_entries=5)
     if titles:
         recent = "Recent sessions in this project:\n" + "\n".join(f"- {t}" for t in titles)
         prompt = f"{recent}\n\nIf you see connections to these previous sessions, " \
                  f"include a \"cross_references\" field.\n\n{base_prompt}"
     else:
         prompt = base_prompt
-
-    entry = _make_entry(digest)
 
     try:
         proc = await asyncio.create_subprocess_exec(

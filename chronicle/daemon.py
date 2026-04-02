@@ -118,6 +118,11 @@ def _read_new_events(offset: int) -> tuple[list[dict], int]:
     if not EVENTS_FILE.exists():
         return [], offset
 
+    file_size = EVENTS_FILE.stat().st_size
+    if offset > file_size:
+        print(f"[chronicle] offset ({offset}) exceeds file size ({file_size}), resetting to 0")
+        offset = 0
+
     events = []
     with open(EVENTS_FILE, "rb") as f:
         f.seek(offset)

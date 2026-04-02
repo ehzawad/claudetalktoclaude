@@ -10,6 +10,7 @@ Usage:
 import argparse
 import os
 import re
+import sys
 from pathlib import Path
 
 from .config import PROJECTS_DIR
@@ -272,8 +273,6 @@ def main():
     subparsers.add_parser("projects", help="List chronicled projects")
 
     # If the first arg isn't a known subcommand, treat it as a project name
-    # e.g. `chronicle query medium` → show that project's sessions/timeline
-    import sys
     known = {"search", "timeline", "sessions", "projects", "-h", "--help"}
     if len(sys.argv) > 1 and sys.argv[1] not in known:
         project_name = sys.argv[1]

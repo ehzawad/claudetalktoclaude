@@ -26,7 +26,6 @@ class FakeDigest:
 
 
 DEFAULT_CONFIG = {
-    "min_turns_to_chronicle": 1,
     "skip_projects": [],
 }
 
@@ -36,15 +35,17 @@ class TestShouldSkip:
         with patch("chronicle.filtering.already_chronicled", return_value=False):
             assert should_skip(FakeDigest(), DEFAULT_CONFIG) is None
 
-    def test_too_few_turns(self):
+    def test_zero_turns_not_skipped(self):
+        """Every session gets recorded, even with zero turns."""
         digest = FakeDigest(total_turns=0)
-        reason = should_skip(digest, {"min_turns_to_chronicle": 3, "skip_projects": []})
-        assert reason is not None
-        assert "turns" in reason
+        with patch("chronicle.filtering.already_chronicled", return_value=False):
+            assert should_skip(digest, DEFAULT_CONFIG) is None
 
-    def test_no_user_prompts(self):
+    def test_no_user_prompts_not_skipped(self):
+        """Sessions with no prompts still get recorded."""
         digest = FakeDigest(user_prompts=[])
-        assert should_skip(digest, DEFAULT_CONFIG) is not None
+        with patch("chronicle.filtering.already_chronicled", return_value=False):
+            assert should_skip(digest, DEFAULT_CONFIG) is None
 
     def test_self_session_detected(self):
         prompt = FakePrompt(text="You are a Decision Chronicler reviewing a session")
@@ -53,7 +54,7 @@ class TestShouldSkip:
         assert reason == "chronicle self-session"
 
     def test_skip_projects(self):
-        config = {"min_turns_to_chronicle": 1, "skip_projects": ["test-project"]}
+        config = {"skip_projects": ["test-project"]}
         reason = should_skip(FakeDigest(), config)
         assert reason == "project in skip list"
 

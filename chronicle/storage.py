@@ -90,62 +90,259 @@ def write_session_record(entry, slug: str):
     session_file.write_text(entry_to_session_markdown(entry))
 
 
+def _remove_session_entry(content: str, session_marker: str) -> str:
+    """Remove an existing session's timeline row + detail section from chronicle.md."""
+    marker_idx = content.index(session_marker)
+
+    # Walk backwards from the marker to find the nearest heading (# or ##)
+    # The marker is always on the line right after the heading
+    search_region = content[max(0, marker_idx - 300):marker_idx]
+    # Find last heading in this region
+    heading_offset = -1
+    for prefix in ("\n# ", "\n## "):
+        pos = search_region.rfind(prefix)
+        if pos >= 0:
+            heading_offset = max(heading_offset, pos)
+    if heading_offset >= 0:
+        heading_start = max(0, marker_idx - 300) + heading_offset + 1  # +1 skip \n
+    else:
+        heading_start = marker_idx  # fallback: just remove from marker
+
+    # Find the --- separator after the marker
+    separator = "\n---\n"
+    sep_idx = content.find(separator, marker_idx)
+    if sep_idx >= 0:
+        section_end = sep_idx + len(separator)
+    else:
+        section_end = len(content)
+
+    content = content[:heading_start] + content[section_end:]
+
+    # Remove stale timeline table row
+    sid = session_marker.split(":")[1].split(" ")[0].rstrip(" ->")
+    short_id = sid[:8]
+    lines = content.split("\n")
+    cleaned = [l for l in lines if not (l.startswith("|") and short_id in l and "](sessions/" in l)]
+    return "\n".join(cleaned)
+
+
+def _demote_headings(md: str) -> str:
+    """Demote markdown headings by one level (# → ##, ## → ###, etc.).
+
+    Only demotes headings that are NOT inside fenced code blocks.
+    """
+    lines = md.split("\n")
+    result = []
+    in_code_block = False
+    for line in lines:
+        if line.startswith("```"):
+            in_code_block = not in_code_block
+        if not in_code_block and line.startswith("#"):
+            line = "#" + line
+        result.append(line)
+    return "\n".join(result)
+
+
+_PROMPTS_MARKER = "<!-- prompts -->"
+
+
+def rebuild_prompts_section(slug: str):
+    """Rebuild the combined chronological prompts section at the end of chronicle.md."""
+    chronicle_file = project_chronicle_dir(slug) / "chronicle.md"
+    if not chronicle_file.exists():
+        return
+
+    sessions_dir = project_chronicle_dir(slug) / "sessions"
+    if not sessions_dir.exists():
+        return
+
+    # Collect all prompts from session files
+    all_prompts = []
+    for md_file in sorted(sessions_dir.glob("*.md")):
+        content = md_file.read_text()
+        # Extract session title
+        title_match = re.match(r"^# (.+)", content)
+        session_title = title_match.group(1) if title_match else md_file.stem
+
+        # Extract prompts from the <details> section
+        details_match = re.search(
+            r"<details><summary>User prompts \(verbatim\)</summary>\s*\n(.*?)</details>",
+            content, re.DOTALL
+        )
+        if not details_match:
+            continue
+
+        prompts_text = details_match.group(1)
+        # Parse individual prompts: **Prompt N** (timestamp):
+        for m in re.finditer(
+            r"\*\*Prompt (\d+)\*\* \(([^)]*)\):\s*\n((?:> .+\n?)+)",
+            prompts_text
+        ):
+            num, ts, quoted = m.group(1), m.group(2), m.group(3)
+            text = "\n".join(line[2:] for line in quoted.strip().split("\n"))
+            all_prompts.append((ts, session_title, int(num), text))
+
+    if not all_prompts:
+        return
+
+    # Sort by timestamp
+    all_prompts.sort(key=lambda x: x[0])
+
+    # Build the prompts section
+    lines = [
+        "",
+        _PROMPTS_MARKER,
+        "",
+        "## All User Prompts (Chronological)",
+        "",
+    ]
+    current_session = None
+    for ts, session_title, num, text in all_prompts:
+        if session_title != current_session:
+            current_session = session_title
+            lines.append(f"### {session_title}")
+            lines.append("")
+        lines.append(f"**Prompt {num}** ({ts}):")
+        for pline in text.split("\n"):
+            lines.append(f"> {pline}")
+        lines.append("")
+
+    prompts_section = "\n".join(lines)
+
+    # Replace or append the prompts section
+    content = chronicle_file.read_text()
+    if _PROMPTS_MARKER in content:
+        marker_idx = content.index(_PROMPTS_MARKER)
+        # Find the start (walk back to find blank line before marker)
+        section_start = content.rfind("\n\n", 0, marker_idx)
+        if section_start == -1:
+            section_start = marker_idx
+        content = content[:section_start] + prompts_section
+    else:
+        content = content.rstrip() + "\n" + prompts_section
+
+    chronicle_file.write_text(content + "\n")
+
+
+_TIMELINE_HEADER = "| Date | Session | Decisions | Summary |"
+_TIMELINE_SEP = "|------|---------|-----------|---------|"
+_TIMELINE_END = "<!-- /timeline -->"
+_DETAIL_START = "<!-- details -->"
+
+
+def _timeline_row(entry, sf: str) -> str:
+    """Build one markdown table row for the timeline."""
+    ts = entry.start_time[:16].replace("T", " ") if entry.start_time else "unknown"
+    title = entry.title or f"Session {entry.session_id[:8]}"
+    # Truncate title for table readability
+    if len(title) > 60:
+        title = title[:57] + "..."
+    n_decisions = len(entry.decisions) if entry.decisions else 0
+    summary = (entry.summary or "")[:100].replace("\n", " ").replace("|", "/")
+    if entry.summary and len(entry.summary) > 100:
+        summary += "..."
+    return f"| {ts} | [{title}](sessions/{sf}) | {n_decisions} | {summary} |"
+
+
 def append_to_chronicle(entry, slug: str):
-    """Append a concise entry to the cumulative project chronicle.md."""
+    """Append to chronicle.md: insert a timeline table row + a detail section."""
     ensure_dirs(slug)
     chronicle_file = project_chronicle_dir(slug) / "chronicle.md"
 
     short_id = entry.session_id[:8]
     ts = entry.start_time[:16].replace("T", " ") if entry.start_time else "unknown"
     title = entry.title or f"Session {short_id}"
+    sf = session_filename(entry)
 
     # Use a specific marker for duplicate detection instead of substring search
     session_marker = f"<!-- session:{entry.session_id} -->"
 
-    lines = []
-    lines.append(f"## {ts} | {title}")
-    lines.append(session_marker)
-    lines.append("")
-
-    if entry.summary:
-        lines.append(entry.summary)
-        lines.append("")
-
-    if entry.decisions:
-        for d in entry.decisions[:5]:
-            what = d.get("what", d) if isinstance(d, dict) else str(d)
-            why = d.get("why", "") if isinstance(d, dict) else ""
-            lines.append(f"- **{what}**")
-            if why:
-                lines.append(f"  - {why}")
-        if len(entry.decisions) > 5:
-            lines.append(f"- ...and {len(entry.decisions) - 5} more decisions")
-        lines.append("")
-
-    if entry.open_questions:
-        lines.append("Open questions:")
-        for q in entry.open_questions[:3]:
-            lines.append(f"- {q}")
-        lines.append("")
-
-    sf = session_filename(entry)
-    lines.append(f"*Full session: [sessions/{sf}](sessions/{sf})*")
-    lines.append("")
-    lines.append("---")
-    lines.append("")
-
-    section = "\n".join(lines)
+    # Full session content — demote headings so # Chronicle stays h1
+    full_md = entry_to_session_markdown(entry)
+    full_md = _demote_headings(full_md)
+    # Inject session marker after the first heading for dedup
+    first_newline = full_md.index("\n")
+    full_md = full_md[:first_newline + 1] + session_marker + "\n" + full_md[first_newline + 1:]
+    detail_section = full_md + "\n---\n\n"
+    table_row = _timeline_row(entry, sf)
 
     if chronicle_file.exists():
         existing = chronicle_file.read_text()
-        # Check for duplicate using the specific marker
+        # If session already exists, remove old entry so we can replace it
         if session_marker in existing:
-            return
-        chronicle_file.write_text(existing + section)
+            existing = _remove_session_entry(existing, session_marker)
+
+        if _TIMELINE_END in existing:
+            # Insert row into existing timeline (after separator, before end marker)
+            # Rows are newest-first, so insert right after the separator line
+            sep_idx = existing.index(_TIMELINE_SEP)
+            after_sep = existing.index("\n", sep_idx) + 1
+            existing = existing[:after_sep] + table_row + "\n" + existing[after_sep:]
+            # Append detail section at the end
+            chronicle_file.write_text(existing + detail_section)
+        else:
+            # Old-format chronicle.md — retrofit a timeline table at the top
+            _retrofit_timeline(chronicle_file, existing)
+            # Re-read and insert normally
+            existing = chronicle_file.read_text()
+            sep_idx = existing.index(_TIMELINE_SEP)
+            after_sep = existing.index("\n", sep_idx) + 1
+            existing = existing[:after_sep] + table_row + "\n" + existing[after_sep:]
+            chronicle_file.write_text(existing + detail_section)
     else:
         project_name = slug.rsplit("-", 1)[-1] if "-" in slug else slug
         header = f"# Chronicle: {project_name}\n\n"
-        chronicle_file.write_text(header + section)
+        timeline = f"{_TIMELINE_HEADER}\n{_TIMELINE_SEP}\n{table_row}\n{_TIMELINE_END}\n\n{_DETAIL_START}\n\n"
+        chronicle_file.write_text(header + timeline + detail_section)
+
+
+def _retrofit_timeline(chronicle_file, existing: str):
+    """Add a timeline table to an existing old-format chronicle.md."""
+    rows = []
+    # Find all existing ## sections and extract their data
+    for match in re.finditer(
+        r"^## (.+?) \| (.+)\n<!-- session:([a-f0-9-]+) -->",
+        existing, re.MULTILINE
+    ):
+        ts, section_title, session_id = match.group(1), match.group(2), match.group(3)
+        # Count decisions (bullet points starting with "- **")
+        # Find the section boundary (next ## or end of string)
+        start = match.end()
+        next_section = re.search(r"^## ", existing[start:], re.MULTILINE)
+        section_text = existing[start:start + next_section.start()] if next_section else existing[start:]
+        n_decisions = len(re.findall(r"^- \*\*", section_text, re.MULTILINE))
+
+        # Find session file link
+        sf_match = re.search(r"\[sessions/(.+?\.md)\]", section_text)
+        sf = sf_match.group(1) if sf_match else ""
+
+        # Extract summary (first paragraph after the marker)
+        summary_match = re.search(r"\n\n(.+?)(?:\n\n|\Z)", section_text, re.DOTALL)
+        summary = ""
+        if summary_match:
+            summary = summary_match.group(1).strip()[:100].replace("\n", " ").replace("|", "/")
+            if len(summary_match.group(1).strip()) > 100:
+                summary += "..."
+
+        title = section_title.strip()
+        if len(title) > 60:
+            title = title[:57] + "..."
+        if sf:
+            row = f"| {ts} | [{title}](sessions/{sf}) | {n_decisions} | {summary} |"
+        else:
+            row = f"| {ts} | {title} | {n_decisions} | {summary} |"
+        rows.append(row)
+
+    # Find where the header ends (after "# Chronicle: ..." line)
+    header_end = existing.index("\n", existing.index("# ")) + 1
+    header = existing[:header_end]
+    body = existing[header_end:].lstrip("\n")
+
+    timeline = f"\n{_TIMELINE_HEADER}\n{_TIMELINE_SEP}\n"
+    timeline += "\n".join(rows) + "\n"
+    timeline += f"{_TIMELINE_END}\n\n{_DETAIL_START}\n\n"
+
+    chronicle_file.write_text(header + timeline + body)
 
 
 def write_chronicle(entry, digest, max_retries: int = 3):
@@ -162,9 +359,9 @@ def write_chronicle(entry, digest, max_retries: int = 3):
         return
 
     if entry.is_empty:
-        print(f"[chronicle] no decisions in {digest.session_id[:8]}")
-        mark_chronicled(digest.session_id, digest.end_time)
-        return
+        # Still write a record — every session appears in rewind
+        entry.title = entry.title or f"Session {digest.session_id[:8]}"
+        entry.summary = entry.summary or "(No meaningful decisions recorded)"
 
     write_session_record(entry, digest.project_slug)
     append_to_chronicle(entry, digest.project_slug)
