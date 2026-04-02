@@ -226,7 +226,7 @@ def _extract_json(text: str) -> dict | None:
                 depth -= 1
                 if depth == 0:
                     last_brace = i
-                    # Don't break — find the LAST balanced closing brace
+                    break  # First complete JSON object
         if last_brace > first_brace:
             try:
                 return json.loads(text[first_brace:last_brace + 1])

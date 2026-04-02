@@ -31,7 +31,7 @@ from .config import (
 )
 from .extractor import extract_session
 from .filtering import should_skip
-from .storage import write_chronicle
+from .storage import write_chronicle, already_chronicled
 from .summarizer import async_summarize_session
 
 
@@ -88,8 +88,12 @@ async def _async_process_one(event: dict, config: dict, semaphore: asyncio.Semap
         return (digest, entry)
 
 
-async def _process_batch(events: list[tuple[str, dict]], config: dict):
-    """Process multiple Stop events concurrently, write in chronological order."""
+async def _process_batch(events: list[tuple[str, dict]], config: dict) -> list[tuple[str, dict]]:
+    """Process multiple Stop events concurrently, write in chronological order.
+
+    Returns (session_id, event) pairs that should be retried on the next
+    debounce cycle. Sessions that exceed max_retries are given up on.
+    """
     concurrency = config.get("concurrency", 5)
     semaphore = asyncio.Semaphore(concurrency)
     tasks = [
@@ -98,19 +102,27 @@ async def _process_batch(events: list[tuple[str, dict]], config: dict):
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Collect successful results, then sort by start_time before writing
     max_retries = config.get("max_retries", 3)
     pending_writes = []
-    for (sid, _), result in zip(events, results):
+    retry = []
+    for (sid, ev), result in zip(events, results):
         if isinstance(result, Exception):
             print(f"[chronicle] error processing {sid[:8]}: {result}",
                   file=sys.stderr)
+            retry.append((sid, ev))
         elif result is not None:
             pending_writes.append(result)
 
     pending_writes.sort(key=lambda pair: pair[0].start_time)
     for digest, entry in pending_writes:
         write_chronicle(entry, digest, max_retries=max_retries)
+        if entry.is_error and not already_chronicled(digest.session_id, digest.end_time):
+            for sid, ev in events:
+                if sid == digest.session_id:
+                    retry.append((sid, ev))
+                    break
+
+    return retry
 
 
 def _read_new_events(offset: int) -> tuple[list[dict], int]:
@@ -133,10 +145,34 @@ def _read_new_events(offset: int) -> tuple[list[dict], int]:
             try:
                 events.append(json.loads(line))
             except json.JSONDecodeError:
+                print("[chronicle] skipping malformed event line", file=sys.stderr)
                 continue
         new_offset = f.tell()
 
     return events, new_offset
+
+
+def _process_events(events: list[dict], pending_sessions: dict) -> bool:
+    """Categorize hook events into pending_sessions.
+
+    Returns True if any activity occurred (caller should reset debounce timer).
+    """
+    activity = False
+    for event in events:
+        event_name = event.get("hook_event_name", "")
+        session_id = event.get("session_id", "")
+
+        if event_name in ("UserPromptSubmit", "Stop", "SessionEnd"):
+            activity = True
+
+        if event_name in ("Stop", "SessionEnd") and session_id:
+            existing = pending_sessions.get(session_id)
+            if not existing or not existing.get("transcript_path"):
+                pending_sessions[session_id] = event
+        elif event_name == "UserPromptSubmit" and session_id:
+            pending_sessions.pop(session_id, None)
+
+    return activity
 
 
 _lock_fd = None  # Module-level storage for the lock file descriptor.
@@ -193,7 +229,7 @@ async def run_daemon_async():
     config = load_config()
     poll_interval = config.get("poll_interval_seconds", 5)
     offset = _read_offset()
-    pending_sessions = {}  # session_id -> (event, first_seen_time)
+    pending_sessions = {}  # session_id -> event dict
     last_activity = 0.0  # timestamp of ANY event from ANY session
 
     while not stop_event.is_set():
@@ -201,23 +237,9 @@ async def run_daemon_async():
             config = load_config()
             events, new_offset = _read_new_events(offset)
 
-            for event in events:
-                event_name = event.get("hook_event_name", "")
-                session_id = event.get("session_id", "")
+            if _process_events(events, pending_sessions):
+                last_activity = time.time()
 
-                # ANY event from ANY session resets the global timer
-                if event_name in ("UserPromptSubmit", "Stop", "SessionEnd"):
-                    last_activity = time.time()
-
-                if event_name in ("Stop", "SessionEnd") and session_id:
-                    pending_sessions[session_id] = (event, time.time())
-
-                elif event_name == "UserPromptSubmit" and session_id:
-                    # Remove from pending — session is still active
-                    pending_sessions.pop(session_id, None)
-
-            # Track new offset but don't persist yet — only save after
-            # successful processing so events aren't lost on crash.
             offset = new_offset
 
             # Only process when ALL sessions have been quiet for quiet_minutes
@@ -229,15 +251,23 @@ async def run_daemon_async():
                 to_process = list(pending_sessions.items())
                 pending_sessions.clear()
                 try:
-                    await _process_batch(to_process, config)
+                    retry = await _process_batch(to_process, config)
+                    if retry:
+                        for sid, ev in retry:
+                            pending_sessions[sid] = ev
+                        last_activity = time.time()
                 except Exception as e:
                     print(f"[chronicle] batch error: {e}", file=sys.stderr)
+                    for sid, ev in to_process:
+                        pending_sessions[sid] = ev
+                    last_activity = time.time()
 
-            # Persist offset after processing completes (or if no processing needed).
-            # On crash during _process_batch, offset hasn't advanced on disk,
-            # so events will be re-read on restart. Processed-session markers
-            # prevent double-processing of successfully completed sessions.
-            _save_offset(offset)
+            # Only persist offset when pending_sessions is empty. While
+            # sessions are waiting for the debounce, they exist only in
+            # memory. Advancing the on-disk offset before they're processed
+            # means a daemon crash loses them permanently.
+            if not pending_sessions:
+                _save_offset(offset)
 
         except Exception as e:
             print(f"[chronicle] loop error: {e}", file=sys.stderr)

@@ -91,16 +91,20 @@ fi
 cd "$INSTALL_DIR"
 
 # 4. Venv + install
-echo "Setting up Python environment..."
-"$PYTHON" -m venv .venv 2>/dev/null || {
-    echo "ERROR: python3-venv not installed."
-    if [ "$OS" = "Darwin" ]; then
-        echo "  Run: brew install python"
-    else
-        echo "  Run: sudo apt install python3-venv"
-    fi
-    exit 1
-}
+if [ -d "$INSTALL_DIR/.venv" ] && [ -x "$INSTALL_DIR/.venv/bin/pip" ]; then
+    echo "Reusing existing Python environment..."
+else
+    echo "Creating Python environment..."
+    "$PYTHON" -m venv .venv 2>/dev/null || {
+        echo "ERROR: python3-venv not installed."
+        if [ "$OS" = "Darwin" ]; then
+            echo "  Run: brew install python"
+        else
+            echo "  Run: sudo apt install python3-venv"
+        fi
+        exit 1
+    }
+fi
 .venv/bin/pip install -e . --quiet
 
 # 5. Symlink to PATH

@@ -63,11 +63,8 @@ def main():
         with open(EVENTS_FILE, "a") as f:
             f.write(json.dumps(data, separators=(",", ":")) + "\n")
 
-        # SessionStart: auto-spawn daemon + inject past decisions as context
-        # Fires on startup, resume, clear, compact
         if event_name == "SessionStart":
-            source = data.get("source", "")
-            if source == "startup" and not _daemon_running():
+            if not _daemon_running():
                 _spawn_daemon()
 
             # Inject recent decisions into the session

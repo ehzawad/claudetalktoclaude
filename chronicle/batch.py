@@ -242,7 +242,7 @@ def main():
             force=args.force,
         ))
     except KeyboardInterrupt:
-        print("\n\nInterrupted. No sessions were marked as processed — safe to retry.")
+        print("\n\nInterrupted. Already-processed sessions will be skipped on retry.")
     except Exception as e:
         print(f"\nError: {e}", file=sys.stderr)
         sys.exit(1)

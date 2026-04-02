@@ -6,10 +6,18 @@ tracking. Used by both daemon.py (real-time processing) and batch.py
 """
 
 import hashlib
+import os
 import re
 
 from .config import CHRONICLE_DIR, ensure_dirs, project_chronicle_dir
 from .summarizer import entry_to_session_markdown
+
+
+def _atomic_write(path, content: str):
+    """Write content atomically via temp file + os.replace."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(content)
+    os.replace(str(tmp), str(path))
 
 
 def chronicled_hash(session_id: str, end_time: str) -> str:
@@ -87,7 +95,7 @@ def write_session_record(entry, slug: str):
         old.unlink()
 
     session_file = session_dir / session_filename(entry)
-    session_file.write_text(entry_to_session_markdown(entry))
+    _atomic_write(session_file, entry_to_session_markdown(entry))
 
 
 def _remove_session_entry(content: str, session_marker: str) -> str:
@@ -95,9 +103,7 @@ def _remove_session_entry(content: str, session_marker: str) -> str:
     marker_idx = content.index(session_marker)
 
     # Walk backwards from the marker to find the nearest heading (# or ##)
-    # The marker is always on the line right after the heading
     search_region = content[max(0, marker_idx - 300):marker_idx]
-    # Find last heading in this region
     heading_offset = -1
     for prefix in ("\n# ", "\n## "):
         pos = search_region.rfind(prefix)
@@ -106,20 +112,26 @@ def _remove_session_entry(content: str, session_marker: str) -> str:
     if heading_offset >= 0:
         heading_start = max(0, marker_idx - 300) + heading_offset + 1  # +1 skip \n
     else:
-        heading_start = marker_idx  # fallback: just remove from marker
+        heading_start = marker_idx
 
-    # Find the --- separator after the marker
+    # Find the LAST \n---\n within this session's section, bounded by the
+    # next session marker. Using rfind instead of find avoids stopping at
+    # the internal --- before <details> and orphaning the prompts block.
+    after_marker = marker_idx + len(session_marker)
+    next_session = content.find("<!-- session:", after_marker)
+    search_bound = next_session if next_session >= 0 else len(content)
+
     separator = "\n---\n"
-    sep_idx = content.find(separator, marker_idx)
+    sep_idx = content.rfind(separator, marker_idx, search_bound)
     if sep_idx >= 0:
         section_end = sep_idx + len(separator)
     else:
-        section_end = len(content)
+        section_end = search_bound
 
     content = content[:heading_start] + content[section_end:]
 
     # Remove stale timeline table row
-    sid = session_marker.split(":")[1].split(" ")[0].rstrip(" ->")
+    sid = session_marker.split(":")[1].split(" ")[0]
     short_id = sid[:8]
     lines = content.split("\n")
     cleaned = [l for l in lines if not (l.startswith("|") and short_id in l and "](sessions/" in l)]
@@ -183,6 +195,14 @@ def rebuild_prompts_section(slug: str):
             all_prompts.append((ts, session_title, int(num), text))
 
     if not all_prompts:
+        # Remove stale prompts section if one exists
+        content = chronicle_file.read_text()
+        if _PROMPTS_MARKER in content:
+            marker_idx = content.index(_PROMPTS_MARKER)
+            section_start = content.rfind("\n\n", 0, marker_idx)
+            if section_start == -1:
+                section_start = marker_idx
+            _atomic_write(chronicle_file, content[:section_start].rstrip() + "\n")
         return
 
     # Sort by timestamp
@@ -221,7 +241,7 @@ def rebuild_prompts_section(slug: str):
     else:
         content = content.rstrip() + "\n" + prompts_section
 
-    chronicle_file.write_text(content + "\n")
+    _atomic_write(chronicle_file, content + "\n")
 
 
 _TIMELINE_HEADER = "| Date | Session | Decisions | Summary |"
@@ -279,7 +299,7 @@ def append_to_chronicle(entry, slug: str):
             after_sep = existing.index("\n", sep_idx) + 1
             existing = existing[:after_sep] + table_row + "\n" + existing[after_sep:]
             # Append detail section at the end
-            chronicle_file.write_text(existing + detail_section)
+            _atomic_write(chronicle_file, existing + detail_section)
         else:
             # Old-format chronicle.md — retrofit a timeline table at the top
             _retrofit_timeline(chronicle_file, existing)
@@ -288,12 +308,12 @@ def append_to_chronicle(entry, slug: str):
             sep_idx = existing.index(_TIMELINE_SEP)
             after_sep = existing.index("\n", sep_idx) + 1
             existing = existing[:after_sep] + table_row + "\n" + existing[after_sep:]
-            chronicle_file.write_text(existing + detail_section)
+            _atomic_write(chronicle_file, existing + detail_section)
     else:
         project_name = slug.rsplit("-", 1)[-1] if "-" in slug else slug
         header = f"# Chronicle: {project_name}\n\n"
         timeline = f"{_TIMELINE_HEADER}\n{_TIMELINE_SEP}\n{table_row}\n{_TIMELINE_END}\n\n{_DETAIL_START}\n\n"
-        chronicle_file.write_text(header + timeline + detail_section)
+        _atomic_write(chronicle_file, header + timeline + detail_section)
 
 
 def _retrofit_timeline(chronicle_file, existing: str):
@@ -342,7 +362,7 @@ def _retrofit_timeline(chronicle_file, existing: str):
     timeline += "\n".join(rows) + "\n"
     timeline += f"{_TIMELINE_END}\n\n{_DETAIL_START}\n\n"
 
-    chronicle_file.write_text(header + timeline + body)
+    _atomic_write(chronicle_file, header + timeline + body)
 
 
 def write_chronicle(entry, digest, max_retries: int = 3):
@@ -365,4 +385,5 @@ def write_chronicle(entry, digest, max_retries: int = 3):
 
     write_session_record(entry, digest.project_slug)
     append_to_chronicle(entry, digest.project_slug)
+    rebuild_prompts_section(digest.project_slug)
     mark_chronicled(digest.session_id, digest.end_time)

@@ -318,7 +318,7 @@ Keep it under 300 words.
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await asyncio.wait_for(
-            proc.communicate(prompt.encode()), timeout=60
+            proc.communicate(prompt.encode()), timeout=300
         )
         if proc.returncode != 0:
             return None

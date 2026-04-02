@@ -52,9 +52,9 @@ Nothing changes about your workflow. Work as usual, close the session.
   │    sid_2 -> event    │     sessions are quiet for
   │                      │     5 minutes
   └──────────┬───────────┘
-             │
-      (5 min global silence)
-             │
+             │                  Offset only persisted
+      (5 min global silence)    to disk when pending_sessions
+             │                  is empty (crash-safe)
              v
   ┌──────────────────────┐
   │  Parallel processing  │
@@ -68,33 +68,38 @@ Nothing changes about your workflow. Work as usual, close the session.
   │  │ 4. Summarize    │  │     claude -p --model opus
   │  │ 5. Return entry │  │     Returns (digest, entry) tuple
   │  └─────────────────┘  │
+  │                       │     Failed sessions are retried
+  │  Failures → retry     │     on the next debounce cycle
+  │  (up to max_retries)  │     (up to max_retries attempts)
   └──────────┬────────────┘
              │
       sort by start_time
              │
              v
   ┌──────────────────────┐
-  │  Write (chronological │     Entries appended to chronicle.md
+  │  Write (chronological │     Entries written to chronicle.md
   │  order guaranteed)    │     in session start_time order
   │                       │
   │  Per session:         │
   │  ├─ session .md file  │     ~/.chronicle/projects/<slug>/sessions/
   │  ├─ chronicle.md      │     ~/.chronicle/projects/<slug>/chronicle.md
+  │  ├─ prompts appendix  │     Aggregated user prompts (chronological)
   │  └─ processed marker  │     ~/.chronicle/.processed/<hash>
   └───────────────────────┘
 ```
 
-### Context injection (next session)
+### Context injection (SessionStart)
 
 ```
-  Developer starts new session
+  Any SessionStart event
+  (startup, resume, clear, compact)
             │
             v
   ┌──────────────────────┐
   │  SessionStart hook    │     (sync — blocks until done)
   │                       │
   │  1. Log event         │
-  │  2. Auto-spawn daemon │     (if not already running)
+  │  2. Auto-spawn daemon │     if not already running
   │  3. Read recent .md   │     ~/.chronicle/projects/<slug>/sessions/
   │     titles            │
   │  4. Return as         │     {"additionalContext": "Previous sessions:
@@ -138,7 +143,7 @@ Nothing changes about your workflow. Work as usual, close the session.
 curl -fsSL https://raw.githubusercontent.com/ehzawad/claudetalktoclaude/main/install.sh | bash
 ```
 
-The script checks your platform, finds Python 3.10+, clones to `~/.chronicle/src`, creates a venv, configures hooks in `~/.claude/settings.json`, and sets secure permissions. Then restart your coding assistant.
+The script checks your platform, finds Python 3.10+, clones to `~/.chronicle/src`, creates a venv (reuses existing on update), configures hooks in `~/.claude/settings.json`, and sets secure permissions. Then restart your coding assistant.
 
 ### Update
 
@@ -263,19 +268,18 @@ Without `--force`, already-processed sessions are skipped. Use `--force` only af
 |-----|---------|-------------|
 | `model` | `"opus"` | Model for summarization |
 | `concurrency` | `5` | Parallel workers |
-| `max_retries` | `3` | Give up on a session after N failed summarization attempts |
 | `poll_interval_seconds` | `5` | Daemon poll interval |
 | `quiet_minutes` | `5` | Global debounce — minutes of silence before processing |
-| `max_retries` | `3` | Give up on a session after this many failed attempts |
+| `max_retries` | `3` | Give up on a session after N failed summarization attempts |
 | `skip_projects` | `[]` | Project slugs to exclude |
 
 ## Where things live
 
 ```
-~/.claude/projects/<slug>/*.jsonl     ← session data (written by Claude Code)
-~/.chronicle/events.jsonl             ← hook event queue
+~/.claude/projects/<slug>/*.jsonl     <- session data (written by Claude Code)
+~/.chronicle/events.jsonl             <- hook event queue
 ~/.chronicle/projects/<slug>/
-  ├── chronicle.md                    ← cumulative project log
+  ├── chronicle.md                    <- cumulative project log
   └── sessions/
       └── 2026-04-01_0611_abc12345_wiring-hooks.md
 ```
@@ -311,26 +315,28 @@ Claude Code behaves exactly the same with or without chronicle installed.
 
 - **Uses your subscription** — each session summarization is one `claude -p` call, comparable to sending a long message. Cost is minimal — a few sessions a day is negligible on any plan. No separate API key or billing needed.
 - **Global debounce** — daemon waits until ALL sessions across ALL projects are quiet for 5 minutes before processing anything
-- **Daemon auto-spawns** on SessionStart, auto-stops/restarts around `chronicle batch`
-- **Transient failures retry** — rate limits don't mark sessions as done, gives up after `max_retries` attempts
+- **Daemon auto-spawns** on any SessionStart event (startup, resume, clear, compact) if not already running
+- **Transient failures retry** — rate limits and timeouts don't mark sessions as done; failed sessions are requeued for the next debounce cycle, up to `max_retries` attempts
 - **Hook errors logged** — failures go to `~/.chronicle/hook-errors.log` instead of being silently swallowed
-- **Ctrl+C is safe** — nothing gets marked as processed on interrupt
+- **Ctrl+C during batch** — already-processed sessions are skipped on retry
 
 ## Project structure
 
 ```
 chronicle/
   hook.py                       # logs events, spawns daemon, injects past decisions
-  daemon.py                     # global debounce, parallel dispatch, chronological writes
-  extractor.py                  # JSONL → interleaved timeline with full tool details
+  daemon.py                     # event categorization, global debounce, parallel dispatch
+  extractor.py                  # JSONL -> interleaved timeline with full tool details
   summarizer.py                 # LLM summarization, JSON extraction, markdown rendering
-  storage.py                    # shared session writing, dedup markers, retry tracking
+  storage.py                    # atomic writes, session dedup, retry tracking, prompts rebuild
   filtering.py                  # shared session filtering logic
   batch.py                      # retroactive processing, parallel workers, --force
   query.py                      # search, timeline, project listing, session lookup
+  rewind.py                     # numbered session navigator, --diff, --since, --summary
   config.py                     # paths, defaults, permissions
   install_hooks.py              # merges hooks into settings.json (preserves existing)
-  __main__.py                   # CLI: daemon, batch, query, install-daemon, reload
+  __main__.py                   # CLI: daemon, batch, query, rewind, install-daemon, reload
   chronicle-daemon.service      # systemd unit for Linux auto-start
-tests/                          # 70 tests covering daemon, batch, hooks, extraction, storage, filtering
+tests/
+  test_fixes.py                 # regression tests for daemon, storage, extraction, hooks
 ```
