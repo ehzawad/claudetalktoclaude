@@ -337,6 +337,4 @@ chronicle/
   install_hooks.py              # merges hooks into settings.json (preserves existing)
   __main__.py                   # CLI: daemon, batch, query, rewind, install-daemon, reload
   chronicle-daemon.service      # systemd unit for Linux auto-start
-tests/
-  test_fixes.py                 # regression tests for daemon, storage, extraction, hooks
 ```
