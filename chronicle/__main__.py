@@ -20,6 +20,11 @@ def main():
         sys.exit(0)
 
     command = sys.argv[1]
+
+    if command in ("--version", "-V"):
+        from . import __version__
+        print(f"chronicle {__version__}")
+        sys.exit(0)
     # Shift argv so submodule parsers see correct args
     sys.argv = [f"chronicle.{command}"] + sys.argv[2:]
 

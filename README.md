@@ -205,6 +205,10 @@ chronicle query sessions              # current project (from project dir)
 chronicle query projects              # all projects
 chronicle query timeline              # recent sessions
 chronicle query search "auth"         # full-text search
+chronicle query myproject             # shorthand — show a project by name
+
+# Version
+chronicle --version
 
 # Process
 chronicle batch --workers 5                                # all projects
@@ -221,7 +225,7 @@ chronicle install-daemon              # auto-start on login (systemd/launchd)
 chronicle reload                      # reinstall + fix symlinks + reconfigure hooks
 ```
 
-`--project` matches by folder name. `chronicle batch --project bada` matches any project whose path contains "bada". Run from anywhere.
+`--project` matches by folder name. `chronicle batch --project bada` matches any project whose path contains "bada". Same for `chronicle query <name>` — partial matches work. Run from anywhere.
 
 Without `--force`, already-processed sessions are skipped. Use `--force` only after changing the summarization prompt or extraction logic.
 
@@ -291,13 +295,13 @@ Chronicle is purely an observer. It does not change any default behavior:
 - Hooks don't return any `block`, `deny`, or `decision` — they just log an event and exit
 - SessionStart injects past decisions as `additionalContext` — additive, doesn't replace anything
 - The daemon reads JSONL files but never writes to `~/.claude/`
-- The `claude -p --bare` summarization is a completely separate process
+- The `claude -p` summarization is a completely separate process
 
 Claude Code behaves exactly the same with or without chronicle installed.
 
 ## Caveats
 
-- **Uses your subscription tokens** — each session summarization is one `claude -p` call, comparable to sending a long message. Cost is minimal — a few sessions a day is negligible on any plan. No separate API key or billing needed.
+- **Uses your subscription tokens** — each session summarization is one `claude -p` call (no `--bare` flag — removed in v0.2.0 due to OAuth credential issues in CLI 2.1.89+), comparable to sending a long message. Cost is minimal — a few sessions a day is negligible on any plan. No separate API key or billing needed.
 - **Global debounce** — daemon waits until ALL sessions across ALL projects are quiet for 5 minutes before processing anything
 - **Daemon auto-spawns** on SessionStart, auto-stops/restarts around `chronicle batch`
 - **Transient failures retry** — rate limits don't mark sessions as done, gives up after `max_retries` attempts

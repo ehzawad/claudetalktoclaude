@@ -159,6 +159,55 @@ def sessions(project_path: str | None = None):
         print(f"No chronicles for {cwd}")
 
 
+def show_project(name: str):
+    """Show chronicle for a project by name (partial match on slug)."""
+    if not PROJECTS_DIR.exists():
+        print(f"No chronicles found for '{name}'.")
+        return
+
+    # Find matching project directories (partial match)
+    matches = []
+    for project_dir in sorted(PROJECTS_DIR.iterdir()):
+        if not project_dir.is_dir():
+            continue
+        if name in project_dir.name:
+            matches.append(project_dir)
+
+    if not matches:
+        # Check unprocessed sessions in ~/.claude/projects/
+        claude_projects = Path.home() / ".claude" / "projects"
+        if claude_projects.exists():
+            pending = [d for d in claude_projects.iterdir()
+                       if d.is_dir() and name in d.name
+                       and list(d.glob("*.jsonl"))]
+            if pending:
+                for d in pending:
+                    count = len(list(d.glob("*.jsonl")))
+                    print(f"  {d.name}: {count} session(s) not yet processed")
+                print(f"\nProcess with: chronicle batch --workers 5")
+                return
+        print(f"No chronicles found matching '{name}'.")
+        return
+
+    for project_dir in matches:
+        sessions_dir = project_dir / "sessions"
+        chronicle_file = project_dir / "chronicle.md"
+        session_count = len(list(sessions_dir.glob("*.md"))) if sessions_dir.exists() else 0
+
+        print(f"Project: {project_dir.name} ({session_count} sessions)")
+        if chronicle_file.exists():
+            print(f"  Chronicle: vim {chronicle_file}\n")
+
+        if sessions_dir.exists():
+            for md_file in sorted(sessions_dir.glob("*.md"), reverse=True):
+                with open(md_file, errors="ignore") as f:
+                    first_line = f.readline().rstrip("\n")
+                title = first_line[2:] if first_line.startswith("# ") else md_file.stem
+                print(f"  {title}")
+                print(f"    vim {md_file}")
+            print()
+
+
 def list_projects():
     """List all chronicled projects. If none, show available projects from Claude Code."""
     # Show chronicled projects
@@ -221,6 +270,15 @@ def main():
     sessions_p.add_argument("path", nargs="?", help="Project path (default: current dir)")
 
     subparsers.add_parser("projects", help="List chronicled projects")
+
+    # If the first arg isn't a known subcommand, treat it as a project name
+    # e.g. `chronicle query medium` → show that project's sessions/timeline
+    import sys
+    known = {"search", "timeline", "sessions", "projects", "-h", "--help"}
+    if len(sys.argv) > 1 and sys.argv[1] not in known:
+        project_name = sys.argv[1]
+        show_project(project_name)
+        return
 
     args = parser.parse_args()
 
