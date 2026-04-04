@@ -17,125 +17,95 @@ Nothing changes about your workflow. Work as usual, close the session.
 3. **One chronicle.md per project** — full session content stacked chronologically with a timeline table at top, plus individual session files
 4. **Next session** gets past decisions injected as context automatically
 
-### Event capture
+### Architecture
 
-```
-  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
-  │  Project A   │  │  Project B   │  │  Project C   │
-  │  (session 1) │  │  (session 2) │  │  (session 3) │
-  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘
-         │                │                │
-    SessionStart     UserPromptSubmit     Stop
-    Stop             Stop              SessionEnd
-    SessionEnd       SessionEnd
-         │                │                │
-         └────────┬───────┴────────┬───────┘
-                  │    hooks fire   │
-                  │    (async)      │
-                  v                 v
-       ~/.chronicle/events.jsonl (shared append-only queue)
-       Each line: {"session_id":"...","hook_event_name":"...","cwd":"..."}
-```
+```mermaid
+flowchart LR
+    subgraph sessions["Claude Code Sessions"]
+        A["Project A"]
+        B["Project B"]
+        C["Project C"]
+    end
 
-### Daemon processing pipeline
+    subgraph hooks["Hook Layer"]
+        EQ[("events.jsonl")]
+    end
 
-```
-       events.jsonl
-            │
-            │  poll every 5s (byte-offset tracking)
-            v
-  ┌──────────────────────┐     UserPromptSubmit from
-  │   DAEMON (singleton) │ <── ANY session resets the
-  │                      │     global debounce timer
-  │  pending_sessions:   │
-  │    sid_1 -> event    │     Only fires when ALL
-  │    sid_2 -> event    │     sessions are quiet for
-  │                      │     5 minutes
-  └──────────┬───────────┘
-             │                  Offset only persisted
-      (5 min global silence)    to disk when pending_sessions
-             │                  is empty (crash-safe)
-             v
-  ┌──────────────────────┐
-  │  Parallel processing  │
-  │  (5 async workers)    │
-  │                       │
-  │  Per session:         │
-  │  ┌─────────────────┐  │
-  │  │ 1. Read JSONL   │  │     ~/.claude/projects/<slug>/<id>.jsonl
-  │  │ 2. Parse turns  │  │     Extract user/assistant/tool timeline
-  │  │ 3. Redact       │  │     API keys, tokens, PEM, JWTs, .env
-  │  │ 4. Summarize    │  │     claude -p --model opus
-  │  │ 5. Return entry │  │     Returns (digest, entry) tuple
-  │  └─────────────────┘  │
-  │                       │     Failed sessions are retried
-  │  Failures → retry     │     on the next debounce cycle
-  │  (up to max_retries)  │     (up to max_retries attempts)
-  └──────────┬────────────┘
-             │
-      sort by start_time
-             │
-             v
-  ┌──────────────────────┐
-  │  Write (chronological │     Entries written to chronicle.md
-  │  order guaranteed)    │     in session start_time order
-  │                       │
-  │  Per session:         │
-  │  ├─ session .md file  │     ~/.chronicle/projects/<slug>/sessions/
-  │  ├─ chronicle.md      │     ~/.chronicle/projects/<slug>/chronicle.md
-  │  ├─ prompts appendix  │     Aggregated user prompts (chronological)
-  │  └─ processed marker  │     ~/.chronicle/.processed/<hash>
-  └───────────────────────┘
+    subgraph daemon["Background Daemon"]
+        DB["Global Debounce"]
+        PW["Parallel Workers x5"]
+    end
+
+    subgraph pipeline["Processing"]
+        EX["Extract JSONL"]
+        RD["Redact Secrets"]
+        SM["claude -p"]
+    end
+
+    subgraph output["Output"]
+        SF["Session .md"]
+        CM["chronicle.md"]
+    end
+
+    A & B & C -->|"hooks fire"| EQ
+    EQ -->|"poll 5s"| DB
+    DB -->|"5 min quiet"| PW
+    PW --> EX --> RD --> SM
+    SM --> SF & CM
+    CM -.->|"inject context"| sessions
 ```
 
-### Context injection (SessionStart)
+### Event flow
 
-```
-  Any SessionStart event
-  (startup, resume, clear, compact)
-            │
-            v
-  ┌──────────────────────┐
-  │  SessionStart hook    │     (sync — blocks until done)
-  │                       │
-  │  1. Log event         │
-  │  2. Auto-spawn daemon │     if not already running
-  │  3. Read recent .md   │     ~/.chronicle/projects/<slug>/sessions/
-  │     titles            │
-  │  4. Return as         │     {"additionalContext": "Previous sessions:
-  │     additionalContext  │       - Wiring authentication hooks
-  │                       │       - Migrating to async workers
-  └───────────────────────┘       - Fixing race in batch processor"}
+```mermaid
+sequenceDiagram
+    participant CC as Claude Code
+    participant H as Hook
+    participant EQ as events.jsonl
+    participant D as Daemon
+    participant API as claude -p
+    participant FS as Markdown Files
+
+    CC->>H: SessionStart
+    H->>EQ: append event
+    H->>D: spawn (if not running)
+    H-->>CC: additionalContext (past decisions)
+
+    CC->>H: UserPromptSubmit
+    H->>EQ: append event
+    Note over D: debounce timer resets
+
+    CC->>H: Stop / SessionEnd
+    H->>EQ: append event
+
+    Note over D: 5 min silence...
+    D->>EQ: read new events
+    D->>D: extract + redact
+    D->>API: summarize transcript
+    API-->>D: structured JSON
+    D->>FS: write session.md + chronicle.md
 ```
 
-### Secret redaction pipeline
+### Secret redaction
 
-```
-  Raw tool output from JSONL
-            │
-            v
-  ┌──────────────────────┐
-  │  Pattern scanner      │
-  │                       │
-  │  ├─ API keys          │     sk-, ghp_, AKIA, xoxb-
-  │  ├─ Bearer tokens     │     Authorization: Bearer ...
-  │  ├─ Private keys      │     -----BEGIN RSA PRIVATE KEY-----
-  │  ├─ JWTs              │     eyJ...
-  │  ├─ Connection URIs   │     postgres://user:pass@host/db
-  │  ├─ Env var assigns   │     API_KEY=..., SECRET=..., PASSWORD=...
-  │  └─ Sensitive files   │     .env, .pem, .key → full content redacted
-  │                       │
-  │  All replaced with    │
-  │  [REDACTED]           │
-  └──────────────────────┘
-```
+All tool outputs pass through a pattern scanner before storage:
+
+| Pattern | Examples |
+|---------|----------|
+| API keys | `sk-`, `ghp_`, `AKIA`, `xoxb-` |
+| Auth headers | `Bearer ...` |
+| Private keys | `-----BEGIN RSA PRIVATE KEY-----` |
+| JWTs | `eyJ...` |
+| Connection URIs | `postgres://user:pass@host/db` |
+| Env var assignments | `API_KEY=...`, `SECRET=...`, `PASSWORD=...` |
+| Sensitive files | `.env`, `.pem`, `.key` — full content redacted |
 
 ## Prerequisites
 
 - **macOS or Linux** (Windows: use WSL)
 - **Python 3.10+** (`python3 --version`)
 - **Claude Code CLI** (`claude --version`)
-- **Claude Code subscription** (Pro, Max, or Teams — summarization uses `claude -p`, counts against your plan's token usage)
+- **Claude Code subscription** (Pro, Max, or Teams — summarization uses `claude -p`)
 
 ## Install
 
@@ -143,17 +113,9 @@ Nothing changes about your workflow. Work as usual, close the session.
 curl -fsSL https://raw.githubusercontent.com/ehzawad/claudetalktoclaude/main/install.sh | bash
 ```
 
-The script checks your platform, finds Python 3.10+, clones to `~/.chronicle/src`, creates a venv (reuses existing on update), configures hooks in `~/.claude/settings.json`, and sets secure permissions. Then restart your coding assistant.
+The script checks your platform, finds Python 3.10+, clones to `~/.chronicle/src`, creates a venv, configures hooks in `~/.claude/settings.json`, and sets secure permissions. Restart Claude Code to activate.
 
-### Update
-
-```bash
-# If installed via curl one-liner:
-cd ~/.chronicle/src && git pull && chronicle reload
-
-# Or just re-run the installer (it updates if already installed):
-curl -fsSL https://raw.githubusercontent.com/ehzawad/claudetalktoclaude/main/install.sh | bash
-```
+To update, just re-run the same command. It handles dirty install directories automatically.
 
 <details><summary>Manual install</summary>
 
@@ -172,7 +134,7 @@ Then add hooks to `~/.claude/settings.json`:
 ```json
 {
   "hooks": {
-    "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "chronicle-hook", "statusMessage": "Loading chronicle context..."}]}],
+    "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "chronicle-hook"}]}],
     "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "chronicle-hook", "async": true}]}],
     "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "chronicle-hook", "async": true}]}],
     "SessionEnd": [{"matcher": "", "hooks": [{"type": "command", "command": "chronicle-hook", "async": true}]}]
@@ -180,85 +142,64 @@ Then add hooks to `~/.claude/settings.json`:
 }
 ```
 
-Hooks go inside a `"hooks": { ... }` wrapper per the [official docs](https://code.claude.com/docs/en/hooks-guide). Restart after editing.
-
 </details>
 
 ## First run
 
 ```bash
-# See what sessions you already have
-chronicle query projects
-
-# Process all past sessions across all projects
-chronicle batch --workers 5
-
-# Or just one project (use the folder name)
-chronicle batch --project myproject --workers 5
-
-# Preview without processing
-chronicle batch --dry-run
+chronicle query projects               # see what sessions exist
+chronicle batch --workers 5            # process all past sessions
+chronicle batch --project myproject    # just one project
+chronicle batch --dry-run              # preview without processing
 ```
 
 ## Usage
 
-After setup, everything is automatic. The daemon processes sessions in the background. These commands are for browsing and manual processing:
+After setup, everything is automatic. These commands are for browsing and manual processing:
 
 ```bash
 # Browse
-chronicle query sessions              # current project (from project dir)
+chronicle query sessions              # current project
 chronicle query projects              # all projects
 chronicle query timeline              # recent sessions
 chronicle query search "auth"         # full-text search
-chronicle query myproject             # shorthand — show a project by name
 
-# Rewind — navigate session history like Claude Code's /rewind
-chronicle rewind                      # numbered session list for current project
-chronicle rewind 3                    # view session #3's full details
-chronicle rewind --since 2            # show sessions #2 through latest
-chronicle rewind --diff 3             # what was NEW in session #3 vs prior
-chronicle rewind --summary 2          # AI-summarize sessions #2 through latest
-chronicle rewind --project myproject  # target a different project
-
-# Version
-chronicle --version
+# Rewind — navigate session history
+chronicle rewind                      # numbered session list
+chronicle rewind 3                    # view session #3
+chronicle rewind --since 2            # sessions #2 through latest
+chronicle rewind --diff 3             # what was NEW in session #3
+chronicle rewind --summary 2          # AI-summarize from #2 onward
 
 # Process
-chronicle batch --workers 5                                # all projects
-chronicle batch --project myproject --workers 5            # one project (folder name)
-chronicle batch --force --project myproject --workers 5    # reprocess after prompt changes
+chronicle batch --workers 5           # all projects
+chronicle batch --force --workers 5   # reprocess everything
 
 # Daemon
 chronicle daemon --status
-chronicle daemon --bg
 chronicle daemon --stop
-chronicle install-daemon              # auto-start on login (systemd/launchd)
+chronicle install-daemon              # auto-start on login
 
 # Maintenance
-chronicle reload                      # reinstall + fix symlinks + reconfigure hooks
+chronicle --version
+chronicle reload                      # reinstall + restart daemon
 ```
 
-`--project` matches by folder name. `chronicle batch --project bada` matches any project whose path contains "bada". Same for `chronicle query <name>` — partial matches work. Run from anywhere.
-
-Without `--force`, already-processed sessions are skipped. Use `--force` only after changing the summarization prompt or extraction logic.
+`--project` matches by folder name substring. Run from anywhere.
 
 ## What gets captured
 
 | Section | Description |
 |---------|-------------|
-| **Turn-by-turn log** | Every turn chronologically — prompts, responses, full Edit diffs, Write content, Bash commands, tool output |
-| **Decisions** | Architecture choices with status (made/rejected/tentative), rationale, alternatives considered |
-| **Narrative** | Chronological account written like an engineer explaining to a colleague |
-| **Problems solved** | Symptom → diagnosis → fix → verification with exact error messages |
+| **Turn-by-turn log** | Every turn — prompts, responses, Edit diffs, Write content, Bash commands, tool output |
+| **Decisions** | Architecture choices with status (made/rejected/tentative), rationale, alternatives |
+| **Narrative** | Chronological account, written like an engineer explaining to a colleague |
+| **Problems solved** | Symptom, diagnosis, fix, verification with exact error messages |
 | **Developer reasoning** | Moments where you pushed back, reframed, or made judgment calls |
-| **Follow-ups** | Clarifying questions: "wait, should we use X?", "what if we tried Y?" |
+| **Follow-ups** | Clarifying questions and what changed as a result |
 | **Architecture** | Project structure, patterns, data flow |
-| **Planning** | Initial plan, how it evolved, work breakdown, what was deferred |
-| **Technical details** | Stack, benchmarks, error messages, commands, config |
-
-## Turns vs prompts
-
-`682 turns, 94 prompts` means 682 total exchanges (user + assistant + tool results), but only 94 were things you typed. The rest were responses, tool outputs, and system messages.
+| **Planning** | Initial plan, how it evolved, what was deferred |
+| **Technical details** | Stack, benchmarks, errors, commands, config |
 
 ## Configuration
 
@@ -270,71 +211,64 @@ Without `--force`, already-processed sessions are skipped. Use `--force` only af
 | `concurrency` | `5` | Parallel workers |
 | `poll_interval_seconds` | `5` | Daemon poll interval |
 | `quiet_minutes` | `5` | Global debounce — minutes of silence before processing |
-| `max_retries` | `3` | Give up on a session after N failed summarization attempts |
+| `max_retries` | `3` | Give up after N failed summarization attempts |
 | `skip_projects` | `[]` | Project slugs to exclude |
 
 ## Where things live
 
 ```
-~/.claude/projects/<slug>/*.jsonl     <- session data (written by Claude Code)
-~/.chronicle/events.jsonl             <- hook event queue
-~/.chronicle/projects/<slug>/
-  ├── chronicle.md                    <- cumulative project log
-  └── sessions/
-      └── 2026-04-01_0611_abc12345_wiring-hooks.md
+~/.claude/projects/<slug>/*.jsonl     <- session data (Claude Code writes these)
+~/.chronicle/
+  ├── events.jsonl                    <- hook event queue
+  ├── config.json                     <- configuration
+  ├── daemon.pid                      <- singleton lock
+  └── projects/<slug>/
+      ├── chronicle.md                <- cumulative project log
+      └── sessions/
+          └── 2026-04-01_abc12345_wiring-hooks.md
 ```
 
-The `<slug>` is your project path with `/` replaced by `-` (underscores preserved).
+The `<slug>` is your project path with `/` replaced by `-`.
 
 ## Security
 
-**Secret redaction**: Tool outputs are scanned for known patterns before storage. Private keys, API keys (`sk-`, `ghp_`, `xoxb-`, `AKIA`), auth headers (`Bearer`), connection strings, JWTs, and env vars (`API_KEY=`, `SECRET=`, `PASSWORD=`) are replaced with `[REDACTED]`. Sensitive file types (`.env`, `.pem`, `.key`, `credentials`) get fully redacted Write content. User prompts are NOT redacted.
+**Secret redaction** — tool outputs are scanned for known patterns before storage. API keys, auth headers, private keys, JWTs, connection strings, and env var assignments are replaced with `[REDACTED]`. Sensitive file types (`.env`, `.pem`, `.key`) get fully redacted content. User prompts are not redacted.
 
-**File permissions**: `~/.chronicle/` is 0700 (owner-only), matching `~/.claude/`.
+**Subscription routing** — `claude -p` subprocess calls strip `ANTHROPIC_API_KEY` from the environment so summarization always routes through your paid subscription instead of API credits ([anthropics/claude-code#2051](https://github.com/anthropics/claude-code/issues/2051)).
 
-**Network**: `claude -p` sends the redacted transcript to the API via your paid subscription. If `ANTHROPIC_API_KEY` is set in your environment, chronicle strips it from subprocess calls so `claude -p` routes through your subscription instead of API credits.
+**File permissions** — `~/.chronicle/` is `0700` (owner-only), matching `~/.claude/`.
+
+**Observer only** — chronicle never writes to `~/.claude/`, never blocks hooks, never modifies Claude Code behavior. The only sync hook (SessionStart) injects past decision titles as additive context.
 
 ## How is this possible
 
-Two things that Claude Code already provides:
+Two things Claude Code already provides:
 
-1. **Session JSONL files** at `~/.claude/projects/<slug>/*.jsonl` — Claude Code writes every conversation turn here. Every prompt, response, tool call, tool result. We just read what it already writes.
-2. **Hooks** in `~/.claude/settings.json` — Claude Code fires events at lifecycle points and runs our command. We just listen.
-
-Chronicle is purely an observer. It does not change any default behavior:
-
-- Async hooks run in the background — Claude Code doesn't wait for them
-- Hooks don't return any `block`, `deny`, or `decision` — they just log an event and exit
-- SessionStart injects past decisions as `additionalContext` — additive, doesn't replace anything
-- The daemon reads JSONL files but never writes to `~/.claude/`
-- The `claude -p` summarization is a completely separate process
-
-Claude Code behaves exactly the same with or without chronicle installed.
+1. **Session JSONL files** at `~/.claude/projects/<slug>/*.jsonl` — every conversation turn. We just read them.
+2. **Hooks** in `~/.claude/settings.json` — lifecycle events. We just listen.
 
 ## Caveats
 
-- **Uses your subscription** — each session summarization is one `claude -p` call, comparable to sending a long message. Cost is minimal — a few sessions a day is negligible on any plan. No separate API key or billing needed. If `ANTHROPIC_API_KEY` is set in your environment, chronicle automatically strips it from `claude -p` subprocess calls so they use your paid subscription (Pro/Max) instead of API credits ([anthropics/claude-code#2051](https://github.com/anthropics/claude-code/issues/2051)).
-- **Global debounce** — daemon waits until ALL sessions across ALL projects are quiet for 5 minutes before processing anything
-- **Daemon auto-spawns** on any SessionStart event (startup, resume, clear, compact) if not already running
-- **Transient failures retry** — rate limits and timeouts don't mark sessions as done; failed sessions are requeued for the next debounce cycle, up to `max_retries` attempts
-- **Hook errors logged** — failures go to `~/.chronicle/hook-errors.log` instead of being silently swallowed
-- **Ctrl+C during batch** — already-processed sessions are skipped on retry
+- **Uses your subscription** — each summarization is one `claude -p` call, comparable to a long message. Cost is negligible on any plan.
+- **Global debounce** — waits until ALL sessions across ALL projects are quiet for 5 minutes
+- **Daemon auto-spawns** on SessionStart if not running
+- **Transient failures retry** — up to `max_retries` attempts per session
+- **Ctrl+C safe** — already-processed sessions are skipped on retry
 
 ## Project structure
 
 ```
 chronicle/
-  hook.py                       # logs events, spawns daemon, injects past decisions
-  daemon.py                     # event categorization, global debounce, parallel dispatch
-  extractor.py                  # JSONL -> interleaved timeline with full tool details
-  summarizer.py                 # LLM summarization, JSON extraction, markdown rendering
-  storage.py                    # atomic writes, session dedup, retry tracking, prompts rebuild
-  filtering.py                  # shared session filtering logic
-  batch.py                      # retroactive processing, parallel workers, --force
-  query.py                      # search, timeline, project listing, session lookup
-  rewind.py                     # numbered session navigator, --diff, --since, --summary
-  config.py                     # paths, defaults, permissions
-  install_hooks.py              # merges hooks into settings.json (preserves existing)
-  __main__.py                   # CLI: daemon, batch, query, rewind, install-daemon, reload
-  chronicle-daemon.service      # systemd unit for Linux auto-start
+  hook.py             # event logging, daemon spawn, context injection
+  daemon.py           # polling, global debounce, parallel dispatch
+  extractor.py        # JSONL parsing, secret redaction, timeline building
+  summarizer.py       # claude -p subprocess, JSON extraction, markdown rendering
+  storage.py          # atomic writes, dedup, retry tracking, chronicle.md management
+  filtering.py        # session skip logic (self-detection, project exclusion)
+  batch.py            # retroactive bulk processing
+  query.py            # search, timeline, project listing
+  rewind.py           # numbered session navigator with --diff, --since, --summary
+  config.py           # paths, defaults, permissions
+  install_hooks.py    # idempotent hook configuration
+  __main__.py         # CLI dispatcher + install-daemon + reload
 ```
