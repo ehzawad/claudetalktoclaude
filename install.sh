@@ -83,7 +83,12 @@ echo ""
 # 3. Clone or update
 if [ -d "$INSTALL_DIR" ]; then
     echo "Updating existing installation..."
-    cd "$INSTALL_DIR" && git pull --quiet
+    cd "$INSTALL_DIR"
+    # Reset to match remote — this is an install target, not a dev repo.
+    # Local modifications come from `chronicle reload` or editable installs
+    # and should not block updates.
+    git fetch --quiet origin
+    git reset --hard origin/main --quiet
 else
     echo "Cloning repository..."
     git clone --quiet https://github.com/ehzawad/claudetalktoclaude.git "$INSTALL_DIR"
