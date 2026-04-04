@@ -87,6 +87,59 @@ def session_filename(entry) -> str:
     return f"{date_part}_{short_id}{title_slug}.md"
 
 
+def unmark_chronicled(session_id: str):
+    """Remove the processed marker for a session so it can be reprocessed."""
+    marker_dir = CHRONICLE_DIR / ".processed"
+    h = chronicled_hash(session_id)
+    marker = marker_dir / h
+    if marker.exists():
+        marker.unlink()
+    attempt = marker_dir / f"{h}.attempts"
+    if attempt.exists():
+        attempt.unlink()
+
+
+def delete_session(session_path, slug: str):
+    """Delete a session .md file, its chronicle.md entry, and its processed marker.
+
+    Does NOT touch ~/.claude/ — only chronicle's own data.
+    """
+    chronicle_file = project_chronicle_dir(slug) / "chronicle.md"
+
+    # Extract session_id from the file content
+    content = session_path.read_text()
+    import re as _re
+    sid_match = _re.search(r"\*\*Session\*\*:\s*(\w+)", content)
+    session_id = sid_match.group(1) if sid_match else session_path.stem[:8]
+
+    # Remove from chronicle.md
+    if chronicle_file.exists():
+        chronicle = chronicle_file.read_text()
+        session_marker = f"<!-- session:{session_id}"
+        # Find full marker (might have full UUID or short ID)
+        for line in chronicle.split("\n"):
+            if session_marker in line:
+                session_marker = line.strip()
+                break
+        if session_marker in chronicle:
+            chronicle = _remove_session_entry(chronicle, session_marker)
+            _atomic_write(chronicle_file, chronicle)
+
+    # Remove session .md file
+    session_path.unlink()
+
+    # Remove processed marker (try both short and full ID)
+    unmark_chronicled(session_id)
+    # Also try with the filename's UUID if different
+    stem = session_path.stem
+    for part in stem.split("_"):
+        if len(part) == 8 and all(c in "0123456789abcdef" for c in part):
+            unmark_chronicled(part)
+
+    # Rebuild prompts section
+    rebuild_prompts_section(slug)
+
+
 def write_session_record(entry, slug: str):
     """Write per-session markdown file."""
     ensure_dirs(slug)

@@ -348,15 +348,58 @@ Keep it under 300 words.
         show_since(sessions, start_num)
 
 
+def delete_session_by_number(sessions: list[dict], project_dir: Path, target_num: int):
+    """Delete a single session by its rewind number."""
+    target = next((s for s in sessions if s["number"] == target_num), None)
+    if not target:
+        print(f"Session #{target_num} not found.")
+        return
+
+    from .storage import delete_session
+    slug = project_dir.name
+    delete_session(target["path"], slug)
+    print(f"  Deleted session #{target_num}: {target['title']}")
+    print(f"  Removed: {target['path'].name}")
+
+
+def prune_empty_sessions(sessions: list[dict], project_dir: Path):
+    """Delete all sessions with 0 decisions (trivial/abandoned sessions)."""
+    from .storage import delete_session
+    slug = project_dir.name
+
+    empty = [s for s in sessions if s["n_decisions"] == 0]
+    if not empty:
+        print("No empty sessions to prune.")
+        return
+
+    print(f"Pruning {len(empty)} session(s) with 0 decisions:\n")
+    for s in empty:
+        print(f"  #{s['number']:>3}  {s['date'][:16]}  {s['title'][:55]}")
+
+    print()
+    confirm = input(f"Delete {len(empty)} session(s)? [y/N] ").strip().lower()
+    if confirm != "y":
+        print("Cancelled.")
+        return
+
+    for s in empty:
+        delete_session(s["path"], slug)
+        print(f"  Deleted #{s['number']}: {s['title']}")
+
+    print(f"\nPruned {len(empty)} sessions. {len(sessions) - len(empty)} remaining.")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Rewind through chronicle sessions",
-        usage="chronicle rewind [N] [--since N] [--summary N] [--diff N] [--project NAME]",
+        usage="chronicle rewind [N] [--since N] [--summary N] [--diff N] [--delete N] [--prune] [--project NAME]",
     )
     parser.add_argument("session", nargs="?", type=int, help="Session number to view")
     parser.add_argument("--since", type=int, metavar="N", help="Show sessions from #N onward")
     parser.add_argument("--summary", type=int, metavar="N", help="AI-summarize sessions from #N onward")
     parser.add_argument("--diff", type=int, metavar="N", help="Show what was new in session #N")
+    parser.add_argument("--delete", type=int, metavar="N", help="Delete session #N")
+    parser.add_argument("--prune", action="store_true", help="Delete all sessions with 0 decisions")
     parser.add_argument("--project", type=str, help="Target a specific project (partial match)")
     args = parser.parse_args()
 
@@ -374,7 +417,14 @@ def main():
         print(f"No session records in {project_dir.name}.")
         sys.exit(1)
 
-    if args.session is not None:
+    if args.delete is not None:
+        if args.delete < 1 or args.delete > len(sessions):
+            print(f"Session #{args.delete} out of range (1–{len(sessions)}).")
+            sys.exit(1)
+        delete_session_by_number(sessions, project_dir, args.delete)
+    elif args.prune:
+        prune_empty_sessions(sessions, project_dir)
+    elif args.session is not None:
         if args.session < 1 or args.session > len(sessions):
             print(f"Session #{args.session} out of range (1–{len(sessions)}).")
             sys.exit(1)

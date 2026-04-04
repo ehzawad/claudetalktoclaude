@@ -1,4 +1,4 @@
 # Decision Chronicle: Persistent Session Knowledge Tracker
 # Captures planning decisions from Claude Code sessions and persists them as markdown.
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"
