@@ -136,6 +136,8 @@ async def async_batch_process(
         print(f"  Would process: {len(eligible)}")
         print(f"  Skipped (filtered): {skip_count}")
         print(f"  Already chronicled: {already_done}")
+        if already_done:
+            print(f"\n  View all sessions: chronicle rewind")
         return
 
     if not eligible:
@@ -210,6 +212,8 @@ async def async_batch_process(
     print(f"  Already chronicled: {already_done}")
     if error_count:
         print(f"  Errors: {error_count}")
+    if already_done:
+        print(f"\n  View all sessions: chronicle rewind")
 
 
 def main():
