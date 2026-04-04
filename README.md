@@ -170,6 +170,8 @@ chronicle rewind 3                    # view session #3
 chronicle rewind --since 2            # sessions #2 through latest
 chronicle rewind --diff 3             # what was NEW in session #3
 chronicle rewind --summary 2          # AI-summarize from #2 onward
+chronicle rewind --delete 3           # delete session #3
+chronicle rewind --prune              # delete all sessions with 0 decisions
 
 # Process
 chronicle batch --workers 5           # all projects
@@ -238,7 +240,7 @@ The `<slug>` is your project path with `/` replaced by `-`.
 
 **File permissions** — `~/.chronicle/` is `0700` (owner-only), matching `~/.claude/`.
 
-**Observer only** — chronicle never writes to `~/.claude/`, never blocks hooks, never modifies Claude Code behavior. The only sync hook (SessionStart) injects past decision titles as additive context.
+**Observer only** — chronicle never writes to `~/.claude/`, never blocks hooks, never modifies Claude Code behavior. The only sync hook (SessionStart) injects past decision titles as additive context. All data lives in `~/.chronicle/` — deleting sessions (`--delete`, `--prune`) only removes chronicle's own markdown files, never Claude Code's session data. You can prune everything and re-run `chronicle batch` to regenerate from the original JSONL files.
 
 ## How is this possible
 
