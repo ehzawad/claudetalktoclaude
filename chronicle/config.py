@@ -10,7 +10,6 @@ OFFSET_FILE = CHRONICLE_DIR / "events.offset"
 PID_FILE = CHRONICLE_DIR / "daemon.pid"
 CONFIG_FILE = CHRONICLE_DIR / "config.json"
 PROJECTS_DIR = CHRONICLE_DIR / "projects"
-CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 DEFAULT_CONFIG = {
     "concurrency": 5,

@@ -20,12 +20,15 @@ def _atomic_write(path, content: str):
     os.replace(str(tmp), str(path))
 
 
-def chronicled_hash(session_id: str, end_time: str) -> str:
-    return hashlib.sha256(f"{session_id}:{end_time}".encode()).hexdigest()[:16]
+def chronicled_hash(session_id: str, end_time: str = "") -> str:
+    # Hash on session_id only — JSONL files grow after processing (e.g.
+    # SessionEnd appended after Stop), shifting end_time and invalidating
+    # the old session_id:end_time hash.  Use --force to reprocess.
+    return hashlib.sha256(session_id.encode()).hexdigest()[:16]
 
 
 def already_chronicled(session_id: str, end_time: str) -> bool:
-    """Check if this session version has already been chronicled."""
+    """Check if this session has already been chronicled."""
     marker_dir = CHRONICLE_DIR / ".processed"
     marker_dir.mkdir(exist_ok=True)
     h = chronicled_hash(session_id, end_time)

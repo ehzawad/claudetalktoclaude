@@ -135,7 +135,7 @@ Nothing changes about your workflow. Work as usual, close the session.
 - **macOS or Linux** (Windows: use WSL)
 - **Python 3.10+** (`python3 --version`)
 - **Claude Code CLI** (`claude --version`)
-- **Any Claude Code subscription** (summarization uses `claude -p`, counts against your plan's token usage)
+- **Claude Code subscription** (Pro, Max, or Teams — summarization uses `claude -p`, counts against your plan's token usage)
 
 ## Install
 
@@ -292,7 +292,7 @@ The `<slug>` is your project path with `/` replaced by `-` (underscores preserve
 
 **File permissions**: `~/.chronicle/` is 0700 (owner-only), matching `~/.claude/`.
 
-**Network**: `claude -p` sends the redacted transcript to the API via your subscription.
+**Network**: `claude -p` sends the redacted transcript to the API via your paid subscription. If `ANTHROPIC_API_KEY` is set in your environment, chronicle strips it from subprocess calls so `claude -p` routes through your subscription instead of API credits.
 
 ## How is this possible
 
@@ -313,7 +313,7 @@ Claude Code behaves exactly the same with or without chronicle installed.
 
 ## Caveats
 
-- **Uses your subscription** — each session summarization is one `claude -p` call, comparable to sending a long message. Cost is minimal — a few sessions a day is negligible on any plan. No separate API key or billing needed.
+- **Uses your subscription** — each session summarization is one `claude -p` call, comparable to sending a long message. Cost is minimal — a few sessions a day is negligible on any plan. No separate API key or billing needed. If `ANTHROPIC_API_KEY` is set in your environment, chronicle automatically strips it from `claude -p` subprocess calls so they use your paid subscription (Pro/Max) instead of API credits ([anthropics/claude-code#2051](https://github.com/anthropics/claude-code/issues/2051)).
 - **Global debounce** — daemon waits until ALL sessions across ALL projects are quiet for 5 minutes before processing anything
 - **Daemon auto-spawns** on any SessionStart event (startup, resume, clear, compact) if not already running
 - **Transient failures retry** — rate limits and timeouts don't mark sessions as done; failed sessions are requeued for the next debounce cycle, up to `max_retries` attempts

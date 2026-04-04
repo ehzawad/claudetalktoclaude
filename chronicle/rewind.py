@@ -309,6 +309,9 @@ Keep it under 300 words.
     print(f"  Summarizing sessions #{start_num}–#{sessions[-1]['number']}...\n")
 
     async def _summarize():
+        # Strip ANTHROPIC_API_KEY so claude -p uses paid subscription.
+        env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+
         proc = await asyncio.create_subprocess_exec(
             "claude", "-p", "--model", model,
             "--output-format", "json",
@@ -316,6 +319,7 @@ Keep it under 300 words.
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
         stdout, stderr = await asyncio.wait_for(
             proc.communicate(prompt.encode()), timeout=300

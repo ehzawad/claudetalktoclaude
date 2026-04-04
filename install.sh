@@ -145,6 +145,7 @@ echo "Verifying installation..."
 if command -v chronicle-hook >/dev/null 2>&1 && command -v chronicle >/dev/null 2>&1; then
     echo "  chronicle-hook: $(which chronicle-hook)"
     echo "  chronicle:      $(which chronicle)"
+    echo "  version:        $(chronicle --version 2>/dev/null || echo 'unknown')"
     echo ""
     echo "Installation complete!"
     echo ""

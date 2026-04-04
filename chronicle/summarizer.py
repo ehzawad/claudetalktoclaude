@@ -1,12 +1,15 @@
 """Call Claude (via `claude -p`) to summarize session content into decisions.
 
-Uses `claude -p --model <model>` for summarization via your subscription.
+Uses `claude -p --model <model>` for summarization via your paid subscription.
+Strips ANTHROPIC_API_KEY from the subprocess environment so `claude -p` always
+routes through the user's subscription (Pro/Max) instead of API credits.
 
 Provides `async_summarize_session()` for parallel processing of multiple sessions.
 """
 
 import asyncio
 import json
+import os
 import sys
 from dataclasses import dataclass, field
 
@@ -257,6 +260,11 @@ def _parse_claude_response(stdout: str, entry: ChronicleEntry) -> ChronicleEntry
     # Parse the outer JSON wrapper from claude -p --output-format json
     try:
         outer = json.loads(stdout)
+        if outer.get("is_error"):
+            print(f"[chronicle] claude -p returned error in response: "
+                  f"{outer.get('result', '')[:200]}", file=sys.stderr)
+            entry.is_error = True
+            return entry
         raw_text = outer.get("result", stdout)
     except json.JSONDecodeError:
         raw_text = stdout
@@ -323,6 +331,10 @@ async def async_summarize_session(digest: SessionDigest) -> ChronicleEntry:
     else:
         prompt = base_prompt
 
+    # Strip ANTHROPIC_API_KEY so claude -p uses the user's paid subscription
+    # (Max/Pro) instead of API key credits. See anthropics/claude-code#2051.
+    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+
     try:
         proc = await asyncio.create_subprocess_exec(
             "claude", "-p", "--model", model,
@@ -331,6 +343,7 @@ async def async_summarize_session(digest: SessionDigest) -> ChronicleEntry:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
         stdout, stderr = await asyncio.wait_for(
             proc.communicate(prompt.encode()), timeout=300
@@ -595,7 +608,6 @@ def entry_to_session_markdown(entry: ChronicleEntry) -> str:
         lines.append("")
 
     return "\n".join(lines)
-
 
 
 if __name__ == "__main__":

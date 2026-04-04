@@ -108,13 +108,25 @@ def install_daemon():
 
 
 def reload_install():
-    """Reinstall from the current source and fix symlinks."""
+    """Reinstall from the current source, fix symlinks, and restart the daemon."""
+    import os
+    import signal
     import subprocess
     from pathlib import Path
+
+    from .daemon import _is_running
 
     src_dir = Path(__file__).resolve().parent.parent
     venv_dir = src_dir / ".venv"
     bin_dir = Path.home() / ".local" / "bin"
+
+    # Stop running daemon so it picks up new code on restart
+    daemon_was_running = False
+    running, pid = _is_running()
+    if running:
+        os.kill(pid, signal.SIGTERM)
+        daemon_was_running = True
+        print(f"Stopped daemon (pid {pid}) for reload.")
 
     print(f"Reinstalling from {src_dir}...")
 
@@ -149,6 +161,20 @@ def reload_install():
     from .install_hooks import install_hooks
     settings_file = Path.home() / ".claude" / "settings.json"
     install_hooks(str(settings_file))
+
+    # Restart daemon if it was running before reload
+    if daemon_was_running:
+        from .config import CHRONICLE_DIR
+        log_file = CHRONICLE_DIR / "daemon.log"
+        with open(log_file, "a") as log_fd:
+            subprocess.Popen(
+                [str(venv_dir / "bin" / "python"), "-m", "chronicle.daemon"],
+                start_new_session=True,
+                stdin=subprocess.DEVNULL,
+                stdout=log_fd,
+                stderr=log_fd,
+            )
+        print("Restarted daemon with new code.")
 
     print("\nReload complete.")
 

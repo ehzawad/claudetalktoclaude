@@ -134,7 +134,7 @@ async def async_batch_process(
             print()
         print(f"\nDRY RUN Summary:")
         print(f"  Would process: {len(eligible)}")
-        print(f"  Skipped (too short): {skip_count}")
+        print(f"  Skipped (filtered): {skip_count}")
         print(f"  Already chronicled: {already_done}")
         return
 
@@ -200,7 +200,8 @@ async def async_batch_process(
             rebuild_prompts_section(slug)
             chronicle_path = project_chronicle_dir(slug) / "chronicle.md"
             if chronicle_path.exists():
-                lines = sum(1 for _ in open(chronicle_path))
+                with open(chronicle_path) as f:
+                    lines = sum(1 for _ in f)
                 print(f"  Chronicle: vim {chronicle_path} ({lines} lines)")
 
     print(f"\nSummary:")
