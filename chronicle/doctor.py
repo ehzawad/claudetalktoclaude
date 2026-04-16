@@ -70,7 +70,11 @@ def collect_diagnostics() -> dict[str, Any]:
         len(list(PROCESSED_DIR.glob("*"))) if PROCESSED_DIR.exists() else 0
     )
 
+    drift_warnings = service.mode_drift_warnings()
+
     return {
+        "schema_version": 1,
+        "ok": not drift_warnings and claude_bin is not None,
         "version": __version__,
         "chronicle_binary": shutil.which("chronicle"),
         "mode": mode,
@@ -112,7 +116,7 @@ def collect_diagnostics() -> dict[str, Any]:
             }
             for r in failed_records if r.get("terminal")
         ][:5],
-        "drift_warnings": service.mode_drift_warnings(),
+        "drift_warnings": drift_warnings,
     }
 
 
@@ -220,4 +224,4 @@ def run(argv: Sequence[str] | None = None) -> int:
     else:
         print_human(data)
 
-    return 0 if not data["drift_warnings"] else 1
+    return 0 if data["ok"] else 1

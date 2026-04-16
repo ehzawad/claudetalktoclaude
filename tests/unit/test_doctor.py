@@ -31,6 +31,7 @@ def isolated_doctor(tmp_path, monkeypatch):
 
 
 _EXPECTED_TOP_KEYS = {
+    "schema_version", "ok",
     "version", "chronicle_binary", "mode", "config_path",
     "claude", "daemon", "service", "locks", "sessions",
     "markers", "failed_sample", "drift_warnings",
@@ -59,7 +60,10 @@ def test_run_json_mode_emits_valid_json(isolated_doctor, capsys):
     out = capsys.readouterr().out
     parsed = json.loads(out)  # raises on invalid JSON
     assert _EXPECTED_TOP_KEYS.issubset(parsed.keys())
-    assert rc == 0  # no drift in isolated environment
+    assert parsed["schema_version"] == 1
+    assert isinstance(parsed["ok"], bool)
+    # Isolated env may not have `claude` binary; just assert rc matches ok.
+    assert (rc == 0) == parsed["ok"]
 
 
 def test_run_text_mode_prints_human_report(isolated_doctor, capsys):
@@ -70,7 +74,9 @@ def test_run_text_mode_prints_human_report(isolated_doctor, capsys):
     assert "mode:" in out
     assert "claude binary" in out
     assert "{" not in out  # not JSON
-    assert rc == 0
+    # rc may be 0 or 1 depending on whether claude binary is resolvable
+    # in the isolated test env; that's orthogonal to text-vs-json rendering.
+    assert rc in (0, 1)
 
 
 def test_run_exit_code_one_on_drift(isolated_doctor, monkeypatch, capsys):
