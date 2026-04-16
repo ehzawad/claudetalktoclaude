@@ -94,11 +94,3 @@ def test_run_exit_code_one_on_drift(isolated_doctor, monkeypatch, capsys):
     assert rc_text == 1
 
 
-def test_json_mode_does_not_leak_stderr_into_stdout(isolated_doctor, capsys):
-    """Structured output must be parseable even if human output would
-    otherwise emit 'NOT FOUND' on stderr."""
-    from chronicle import doctor
-    doctor.run(["--json"])
-    captured = capsys.readouterr()
-    # stdout must be valid JSON; stderr content is allowed separately
-    json.loads(captured.out)

@@ -61,10 +61,15 @@ class SessionDigest:
     total_turns: int = 0
 
 
-# Secret patterns to redact from tool outputs, commands, and file content
+# Secret patterns to redact from tool outputs, commands, and file content.
+# Order matters — earlier alternations take precedence at each match position.
+# The `Authorization:` header case is split out explicitly so it consumes the
+# entire header value (to end of line), otherwise the generic AUTH[=:]... clause
+# would eat "Authorization: Bearer" and leave the actual token naked after it.
 _SECRET_PATTERNS = re.compile(
     r"(?:"
     r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----|"
+    r"Authorization:\s*[^\r\n]+|"
     r"(?:export\s+)?(?:API_KEY|SECRET|TOKEN|PASSWORD|CREDENTIALS|AUTH|PRIVATE_KEY|ACCESS_KEY)"
     r"[_A-Z]*[\s]*[=:]\s*\S+|"
     r"Bearer\s+\S+|"

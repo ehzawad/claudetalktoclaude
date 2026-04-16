@@ -21,7 +21,9 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config import CHRONICLE_DIR, PID_FILE, EVENTS_FILE, load_recent_titles
+from .config import (
+    chronicle_dir, pid_file, events_file, load_recent_titles,
+)
 
 _MAX_ERROR_LOG_BYTES = 1_000_000  # ~1MB cap
 
@@ -31,7 +33,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 def _daemon_running() -> bool:
     """Check if the daemon process is alive via PID file."""
     try:
-        pid = int(PID_FILE.read_text().strip())
+        pid = int(pid_file().read_text().strip())
         os.kill(pid, 0)
         return True
     except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError):
@@ -40,7 +42,7 @@ def _daemon_running() -> bool:
 
 def _spawn_daemon():
     """Launch daemon in background, fully detached from this process."""
-    log_file = CHRONICLE_DIR / "daemon.log"
+    log_file = chronicle_dir() / "daemon.log"
     with open(log_file, "a") as log_fd:
         subprocess.Popen(
             [sys.executable, "-m", "chronicle.daemon"],
@@ -54,8 +56,8 @@ def _spawn_daemon():
 
 def main():
     try:
-        CHRONICLE_DIR.mkdir(parents=True, exist_ok=True)
-        os.chmod(str(CHRONICLE_DIR), 0o700)
+        chronicle_dir().mkdir(parents=True, exist_ok=True)
+        os.chmod(str(chronicle_dir()), 0o700)
         data = json.loads(sys.stdin.read())
         event_name = data.get("hook_event_name", "")
         data["chronicle_timestamp"] = datetime.now(timezone.utc).strftime(
@@ -63,7 +65,7 @@ def main():
         )
 
         # Always log the event
-        with open(EVENTS_FILE, "a") as f:
+        with open(events_file(), "a") as f:
             f.write(json.dumps(data, separators=(",", ":")) + "\n")
 
         if event_name == "SessionStart":
@@ -99,7 +101,7 @@ def main():
     except Exception:
         # Never block the primary session, but log failures for diagnosis.
         try:
-            error_log = CHRONICLE_DIR / "hook-errors.log"
+            error_log = chronicle_dir() / "hook-errors.log"
             error_log.parent.mkdir(parents=True, exist_ok=True)
             # Cap log size by truncating from the front
             if error_log.exists() and error_log.stat().st_size > _MAX_ERROR_LOG_BYTES:

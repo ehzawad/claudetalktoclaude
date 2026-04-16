@@ -41,7 +41,7 @@ from pathlib import Path
 
 from .claude_cli import terminate_active_subprocesses
 from .config import (
-    CHRONICLE_DIR, CLAUDE_PROJECTS, EVENTS_FILE, OFFSET_FILE, PID_FILE,
+    chronicle_dir, claude_projects, events_file, offset_file, pid_file,
     load_config, save_default_config,
 )
 from .extractor import extract_session
@@ -58,18 +58,18 @@ from .summarizer import async_summarize_session
 
 
 def _read_offset() -> int:
-    if OFFSET_FILE.exists():
+    if offset_file().exists():
         try:
-            return int(OFFSET_FILE.read_text().strip())
+            return int(offset_file().read_text().strip())
         except (ValueError, OSError):
             return 0
     return 0
 
 
 def _save_offset(offset: int):
-    tmp = OFFSET_FILE.with_suffix(".tmp")
+    tmp = offset_file().with_suffix(".tmp")
     tmp.write_text(str(offset))
-    os.replace(str(tmp), str(OFFSET_FILE))
+    os.replace(str(tmp), str(offset_file()))
 
 
 def _extract_and_filter(event: dict, config: dict):
@@ -164,15 +164,15 @@ def _read_new_events(offset: int) -> tuple[list[dict], int]:
     Malformed COMPLETE lines (have a trailing \\n but fail json.loads) are
     skipped with the offset advancing past them so they don't re-appear.
     """
-    if not EVENTS_FILE.exists():
+    if not events_file().exists():
         return [], offset
 
-    file_size = EVENTS_FILE.stat().st_size
+    file_size = events_file().stat().st_size
     if offset > file_size:
         print(f"[chronicle] offset ({offset}) exceeds file size ({file_size}), resetting to 0")
         offset = 0
 
-    with open(EVENTS_FILE, "rb") as f:
+    with open(events_file(), "rb") as f:
         f.seek(offset)
         buf = f.read()
 
@@ -243,11 +243,11 @@ def _scan_for_unprocessed(pending_sessions: dict, config: dict) -> int:
     Adds synthetic events for discovered sessions so the normal debounce +
     processing pipeline handles them. Returns count of newly queued sessions.
     """
-    if not CLAUDE_PROJECTS.exists():
+    if not claude_projects().exists():
         return 0
 
     queued = 0
-    for project_dir in CLAUDE_PROJECTS.iterdir():
+    for project_dir in claude_projects().iterdir():
         if not project_dir.is_dir():
             continue
         skip_projects = config.get("skip_projects", [])
@@ -316,7 +316,7 @@ async def run_daemon_async():
             sys.exit(1)
         print("[chronicle] could not acquire singleton lock and no running "
               "daemon detected — check permissions on "
-              f"{PID_FILE} and {CHRONICLE_DIR}", file=sys.stderr)
+              f"{pid_file()} and {chronicle_dir()}", file=sys.stderr)
         sys.exit(2)
 
     print(f"[chronicle] daemon started (pid {os.getpid()})")
@@ -476,8 +476,8 @@ def main():
         devnull = os.open(os.devnull, os.O_RDONLY)
         os.dup2(devnull, sys.stdin.fileno())
         os.close(devnull)
-        CHRONICLE_DIR.mkdir(parents=True, exist_ok=True)
-        log_file = CHRONICLE_DIR / "daemon.log"
+        chronicle_dir().mkdir(parents=True, exist_ok=True)
+        log_file = chronicle_dir() / "daemon.log"
         log_fd = open(log_file, "a")
         os.dup2(log_fd.fileno(), sys.stdout.fileno())
         os.dup2(log_fd.fileno(), sys.stderr.fileno())

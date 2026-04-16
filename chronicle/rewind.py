@@ -16,17 +16,17 @@ import sys
 from pathlib import Path
 
 
-from .config import PROJECTS_DIR
+from .config import projects_dir
 
 
 def _find_project_dir(project: str | None = None) -> Path | None:
     """Resolve which project to rewind through."""
-    if not PROJECTS_DIR.exists():
+    if not projects_dir().exists():
         return None
 
     if project:
         # Partial match on slug
-        for d in sorted(PROJECTS_DIR.iterdir()):
+        for d in sorted(projects_dir().iterdir()):
             if d.is_dir() and project in d.name:
                 return d
         return None
@@ -34,13 +34,13 @@ def _find_project_dir(project: str | None = None) -> Path | None:
     # Default: current working directory
     cwd = os.getcwd()
     slug = cwd.replace("/", "-")
-    candidate = PROJECTS_DIR / slug
+    candidate = projects_dir() / slug
     if candidate.exists():
         return candidate
 
     # Try partial match on the last component
     dir_name = os.path.basename(cwd)
-    for d in sorted(PROJECTS_DIR.iterdir()):
+    for d in sorted(projects_dir().iterdir()):
         if d.is_dir() and dir_name in d.name:
             return d
 

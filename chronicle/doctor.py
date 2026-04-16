@@ -19,8 +19,8 @@ from typing import Any, Sequence
 from . import service
 from .claude_cli import try_resolve_claude_binary
 from .config import (
-    CHRONICLE_DIR, CLAUDE_PROJECTS, CONFIG_FILE, FAILED_DIR,
-    PROCESSED_DIR, PROCESSING_LOCK,
+    chronicle_dir, claude_projects, config_file, failed_dir,
+    processed_dir, processing_lock_path,
 )
 from .locks import daemon_is_running, processing_lock_held
 from .mode import get_processing_mode
@@ -32,8 +32,8 @@ def _count_sessions() -> dict:
     ok = 0
     term = 0
     pending = 0
-    if CLAUDE_PROJECTS.exists():
-        for proj in CLAUDE_PROJECTS.iterdir():
+    if claude_projects().exists():
+        for proj in claude_projects().iterdir():
             if not proj.is_dir():
                 continue
             for jsonl in proj.glob("*.jsonl"):
@@ -67,7 +67,7 @@ def collect_diagnostics() -> dict[str, Any]:
     sessions = _count_sessions()
 
     processed_marker_count = (
-        len(list(PROCESSED_DIR.glob("*"))) if PROCESSED_DIR.exists() else 0
+        len(list(processed_dir().glob("*"))) if processed_dir().exists() else 0
     )
 
     drift_warnings = service.mode_drift_warnings()
@@ -78,7 +78,7 @@ def collect_diagnostics() -> dict[str, Any]:
         "version": __version__,
         "chronicle_binary": shutil.which("chronicle"),
         "mode": mode,
-        "config_path": str(CONFIG_FILE),
+        "config_path": str(config_file()),
         "claude": {
             "resolved": str(claude_bin) if claude_bin else None,
             "path_env": os.environ.get("PATH", ""),
@@ -93,9 +93,9 @@ def collect_diagnostics() -> dict[str, Any]:
             "running": service.service_running(),
         },
         "locks": {
-            "pid_file": str(CHRONICLE_DIR / "daemon.pid"),
+            "pid_file": str(chronicle_dir() / "daemon.pid"),
             "processing_lock": {
-                "path": str(PROCESSING_LOCK),
+                "path": str(processing_lock_path()),
                 "held": processing_lock_held(),
             },
         },

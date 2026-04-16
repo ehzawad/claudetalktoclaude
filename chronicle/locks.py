@@ -21,7 +21,7 @@ import os
 from pathlib import Path
 from typing import Iterator, Optional
 
-from .config import PID_FILE, PROCESSING_LOCK
+from .config import pid_file, processing_lock_path
 
 
 # ---------- Singleton daemon lock (stays open for daemon lifetime) ----------
@@ -37,8 +37,8 @@ def acquire_daemon_lock() -> bool:
     PID-file situations (file deleted + recreated by another daemon).
     """
     global _daemon_lock_fd
-    PID_FILE.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(PID_FILE), os.O_CREAT | os.O_WRONLY, 0o600)
+    pid_file().parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(pid_file()), os.O_CREAT | os.O_WRONLY, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         os.write(fd, str(os.getpid()).encode())
@@ -61,7 +61,7 @@ def daemon_lock_still_valid() -> bool:
         return False
     try:
         fd_stat = os.fstat(_daemon_lock_fd)
-        path_stat = os.stat(str(PID_FILE))
+        path_stat = os.stat(str(pid_file()))
         return (fd_stat.st_ino == path_stat.st_ino
                 and fd_stat.st_dev == path_stat.st_dev)
     except OSError:
@@ -74,10 +74,10 @@ def daemon_is_running() -> tuple[bool, Optional[int]]:
     Returns (is_running, pid_or_None). Not authoritative across hosts;
     only valid locally.
     """
-    if not PID_FILE.exists():
+    if not pid_file().exists():
         return False, None
     try:
-        pid = int(PID_FILE.read_text().strip())
+        pid = int(pid_file().read_text().strip())
         os.kill(pid, 0)
         return True, pid
     except (ValueError, OSError):
@@ -103,8 +103,8 @@ def processing_lock(blocking: bool = True) -> Iterator[bool]:
     If blocking=True, waits for the lock. If False, yields immediately
     with a bool indicating whether the lock was acquired.
     """
-    PROCESSING_LOCK.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(PROCESSING_LOCK), os.O_CREAT | os.O_WRONLY, 0o600)
+    processing_lock_path().parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(processing_lock_path()), os.O_CREAT | os.O_WRONLY, 0o600)
     flags = fcntl.LOCK_EX if blocking else (fcntl.LOCK_EX | fcntl.LOCK_NB)
     acquired = False
     try:
@@ -125,9 +125,9 @@ def processing_lock(blocking: bool = True) -> Iterator[bool]:
 
 def processing_lock_held() -> bool:
     """True iff some process currently holds the processing lock."""
-    if not PROCESSING_LOCK.exists():
+    if not processing_lock_path().exists():
         return False
-    fd = os.open(str(PROCESSING_LOCK), os.O_WRONLY)
+    fd = os.open(str(processing_lock_path()), os.O_WRONLY)
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

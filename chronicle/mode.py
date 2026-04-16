@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import os
 
-from .config import CONFIG_FILE, PROCESSING_MODES, load_config, save_default_config
+from .config import config_file, PROCESSING_MODES, load_config, save_default_config
 
 
 def get_processing_mode() -> str:
@@ -47,13 +47,13 @@ def set_processing_mode(mode: str) -> None:
         )
     save_default_config()  # ensures file exists
     cfg = {}
-    if CONFIG_FILE.exists():
+    if config_file().exists():
         try:
-            cfg = json.loads(CONFIG_FILE.read_text())
+            cfg = json.loads(config_file().read_text())
         except (OSError, json.JSONDecodeError):
             cfg = {}
     cfg["processing_mode"] = mode
-    tmp = CONFIG_FILE.with_suffix(".tmp")
+    tmp = config_file().with_suffix(".tmp")
     tmp.write_text(json.dumps(cfg, indent=2) + "\n")
-    os.replace(str(tmp), str(CONFIG_FILE))
-    os.chmod(CONFIG_FILE, 0o600)
+    os.replace(str(tmp), str(config_file()))
+    os.chmod(config_file(), 0o600)

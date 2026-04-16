@@ -20,12 +20,12 @@ import shlex
 import sys
 from pathlib import Path
 
-from .config import PROJECTS_DIR
+from .config import projects_dir
 
 
 def search(query: str, project: str | None = None):
     """Full-text search across all chronicle markdown files."""
-    if not PROJECTS_DIR.exists():
+    if not projects_dir().exists():
         print("No chronicles found. Run `chronicle process` "
               "or enable background mode with `chronicle install-daemon`.")
         return
@@ -33,7 +33,7 @@ def search(query: str, project: str | None = None):
     pattern = re.compile(re.escape(query), re.IGNORECASE)
     results = []
 
-    for md_file in sorted(PROJECTS_DIR.rglob("*.md")):
+    for md_file in sorted(projects_dir().rglob("*.md")):
         if project and project not in str(md_file):
             continue
 
@@ -59,7 +59,7 @@ def search(query: str, project: str | None = None):
     current_file = None
     for filepath, context in results:
         if filepath != current_file:
-            rel = filepath.relative_to(PROJECTS_DIR)
+            rel = filepath.relative_to(projects_dir())
             print(f"--- {rel} ---")
             current_file = filepath
         print(f"  ...{context}...")
@@ -68,12 +68,12 @@ def search(query: str, project: str | None = None):
 
 def timeline(limit: int = 20, project: str | None = None):
     """Show recent session records, newest first."""
-    if not PROJECTS_DIR.exists():
+    if not projects_dir().exists():
         print("No chronicles found.")
         return
 
     sessions = []
-    for session_file in PROJECTS_DIR.rglob("sessions/*.md"):
+    for session_file in projects_dir().rglob("sessions/*.md"):
         if project and project not in str(session_file):
             continue
         content = session_file.read_text()
@@ -116,12 +116,12 @@ def sessions(project_path: str | None = None):
     cwd = project_path or os.environ.get("CHRONICLE_ORIGINAL_CWD", os.getcwd())
     cwd = cwd.rstrip("/")
     slug = cwd.replace("/", "-")
-    project_dir = PROJECTS_DIR / slug
+    project_dir = projects_dir() / slug
 
     # If exact slug doesn't match, try substring match (e.g. "codex-opinion"
     # matches "-home-synesis-codex-opinion")
-    if not project_dir.exists() and PROJECTS_DIR.exists() and project_path:
-        matches = [d for d in sorted(PROJECTS_DIR.iterdir())
+    if not project_dir.exists() and projects_dir().exists() and project_path:
+        matches = [d for d in sorted(projects_dir().iterdir())
                     if d.is_dir() and project_path in d.name]
         if matches:
             project_dir = matches[0]
@@ -198,13 +198,13 @@ def sessions(project_path: str | None = None):
 
 def show_project(name: str):
     """Show chronicle for a project by name (partial match on slug)."""
-    if not PROJECTS_DIR.exists():
+    if not projects_dir().exists():
         print(f"No chronicles found for '{name}'.")
         return
 
     # Find matching project directories (partial match)
     matches = []
-    for project_dir in sorted(PROJECTS_DIR.iterdir()):
+    for project_dir in sorted(projects_dir().iterdir()):
         if not project_dir.is_dir():
             continue
         if name in project_dir.name:
@@ -258,8 +258,8 @@ def list_projects():
 
     # Gather slugs from both sides
     slugs: set[str] = set()
-    if PROJECTS_DIR.exists():
-        for d in PROJECTS_DIR.iterdir():
+    if projects_dir().exists():
+        for d in projects_dir().iterdir():
             if d.is_dir():
                 slugs.add(d.name)
     if claude_projects.exists():

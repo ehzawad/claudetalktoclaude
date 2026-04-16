@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import (
-    CHRONICLE_DIR, FAILED_DIR, PROCESSED_DIR,
+    chronicle_dir, failed_dir, processed_dir,
     ensure_dirs, project_chronicle_dir,
 )
 from .summarizer import entry_to_session_markdown
@@ -50,27 +50,27 @@ def _ensure_dir(d: Path):
 
 def is_succeeded(session_id: str) -> bool:
     """Check whether this session has a success marker."""
-    _ensure_dir(PROCESSED_DIR)
-    return (PROCESSED_DIR / session_hash(session_id)).exists()
+    _ensure_dir(processed_dir())
+    return (processed_dir() / session_hash(session_id)).exists()
 
 
 def mark_succeeded(session_id: str, end_time: str, cost_usd: float = 0.0):
     """Record a successful chronicle; clear any failure state."""
-    _ensure_dir(PROCESSED_DIR)
+    _ensure_dir(processed_dir())
     h = session_hash(session_id)
-    (PROCESSED_DIR / h).write_text(f"{session_id}\n{end_time}\n{cost_usd:.4f}\n")
+    (processed_dir() / h).write_text(f"{session_id}\n{end_time}\n{cost_usd:.4f}\n")
     clear_failed(session_id)
 
 
 # --- Failure markers (.failed/) — unified retry counter + terminal flag ---
 
 def _failed_path(session_id: str) -> Path:
-    return FAILED_DIR / f"{session_hash(session_id)}.json"
+    return failed_dir() / f"{session_hash(session_id)}.json"
 
 
 def get_failed(session_id: str) -> dict | None:
     """Return the .failed/<hash>.json record if present, else None."""
-    _ensure_dir(FAILED_DIR)
+    _ensure_dir(failed_dir())
     p = _failed_path(session_id)
     if not p.exists():
         return None
@@ -97,7 +97,7 @@ def record_failed_attempt(session_id: str, *, error_kind: str,
 
     Pass terminal=True when max_retries has been reached.
     """
-    _ensure_dir(FAILED_DIR)
+    _ensure_dir(failed_dir())
     rec = get_failed(session_id) or {"session_id": session_id, "attempts": 0}
     rec["attempts"] = int(rec.get("attempts", 0)) + 1
     rec["terminal"] = bool(terminal)
@@ -120,9 +120,9 @@ def list_failed(*, terminal_only: bool = False) -> list[dict]:
     """Return failure records. Default returns BOTH terminal and in-progress;
     pass terminal_only=True to filter to only terminal=true records.
     Used by query/doctor."""
-    _ensure_dir(FAILED_DIR)
+    _ensure_dir(failed_dir())
     out = []
-    for p in sorted(FAILED_DIR.glob("*.json")):
+    for p in sorted(failed_dir().glob("*.json")):
         try:
             rec = json.loads(p.read_text())
         except (OSError, json.JSONDecodeError):
@@ -163,12 +163,12 @@ def clear_session_markers(session_id: str):
     Tries exact hash first. If that fails (e.g. short ID vs full UUID mismatch),
     scans .processed/ marker files by content to find the right one.
     """
-    _ensure_dir(PROCESSED_DIR)
-    _ensure_dir(FAILED_DIR)
+    _ensure_dir(processed_dir())
+    _ensure_dir(failed_dir())
 
     h = session_hash(session_id)
     removed_any = False
-    for p in (PROCESSED_DIR / h, FAILED_DIR / f"{h}.json"):
+    for p in (processed_dir() / h, failed_dir() / f"{h}.json"):
         if p.exists():
             p.unlink()
             removed_any = True
@@ -176,7 +176,7 @@ def clear_session_markers(session_id: str):
         return
 
     # Fallback: the caller passed a short ID. Scan success markers by content.
-    for marker in PROCESSED_DIR.glob("[0-9a-f]*"):
+    for marker in processed_dir().glob("[0-9a-f]*"):
         if not marker.is_file():
             continue
         try:

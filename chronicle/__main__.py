@@ -214,8 +214,8 @@ def reload_install():
 
     # Restart daemon if it was running before reload
     if daemon_was_running:
-        from .config import CHRONICLE_DIR
-        log_file = CHRONICLE_DIR / "daemon.log"
+        from .config import chronicle_dir
+        log_file = chronicle_dir() / "daemon.log"
         with open(log_file, "a") as log_fd:
             subprocess.Popen(
                 [str(venv_dir / "bin" / "python"), "-m", "chronicle.daemon"],

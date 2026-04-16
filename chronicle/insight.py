@@ -22,22 +22,22 @@ from collections import Counter
 from pathlib import Path
 
 from .claude_cli import spawn_claude
-from .config import PROJECTS_DIR, load_config
+from .config import projects_dir, load_config
 
 
 def _find_project(name: str | None) -> Path | None:
     """Resolve project directory from name or cwd."""
-    if not PROJECTS_DIR.exists():
+    if not projects_dir().exists():
         return None
 
     if name:
-        matches = [d for d in sorted(PROJECTS_DIR.iterdir())
+        matches = [d for d in sorted(projects_dir().iterdir())
                     if d.is_dir() and name in d.name]
         return matches[0] if matches else None
 
     cwd = os.getcwd()
     slug = cwd.replace("/", "-")
-    project_dir = PROJECTS_DIR / slug
+    project_dir = projects_dir() / slug
     return project_dir if project_dir.exists() else None
 
 

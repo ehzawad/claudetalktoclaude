@@ -26,7 +26,9 @@ import sys
 import time
 from pathlib import Path
 
-from .config import CHRONICLE_DIR, CLAUDE_PROJECTS, load_config, save_default_config
+from .config import (
+    chronicle_dir, claude_projects, load_config, save_default_config,
+)
 from .extractor import extract_session
 from .filtering import should_skip
 from .locks import processing_lock
@@ -47,11 +49,11 @@ PROGRESS_INTERVAL_SECONDS = 15
 
 def find_all_sessions(project_filter: str | None = None) -> list[tuple[str, Path]]:
     """Find all session JSONL files across all projects."""
-    if not CLAUDE_PROJECTS.exists():
+    if not claude_projects().exists():
         return []
 
     sessions = []
-    for project_dir in sorted(CLAUDE_PROJECTS.iterdir()):
+    for project_dir in sorted(claude_projects().iterdir()):
         if not project_dir.is_dir():
             continue
         if project_filter and project_filter not in project_dir.name:

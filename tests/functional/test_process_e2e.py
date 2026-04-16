@@ -187,16 +187,10 @@ class TestRetryFailedRecovers:
         assert not (home / ".chronicle" / ".failed" / f"{h}.json").exists()
 
 
-class TestModeSwitching:
-    def test_install_uninstall_daemon_toggles_mode(self, fake_env, tmp_path):
-        home, bin_dir = fake_env
-        # Start in foreground (default)
-        r = _run_chronicle(["doctor"], home=home, bin_dir=bin_dir)
-        assert "mode:        foreground" in r.stdout
-
-        # Note: install-daemon actually tries to call launchctl/systemctl.
-        # For this test we only verify the mode flip part via Python API
-        # (service subprocess calls are mocked/no-ops when the service
-        # manager binaries aren't on PATH in our isolated env).
-        # The functional install/bootstrap path is tested manually
-        # after reinstall in the final verification step.
+# Mode-switching round-trip (install-daemon/uninstall-daemon) is covered
+# by the live verification in install.sh + `chronicle doctor` outputs, not
+# in the subprocess-based functional suite, because exercising the real
+# launchctl/systemctl here would either hit the actual user service
+# manager or require heavyweight mocks for little additional insurance.
+# Unit coverage for the mode switch itself lives in test_mode.py and
+# test_service.py.
