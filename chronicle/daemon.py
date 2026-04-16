@@ -1,18 +1,33 @@
 """Background chronicler daemon.
 
-Polls ~/.chronicle/events.jsonl for hook events. Uses a global debounce:
-waits until ALL sessions across ALL projects have been quiet for 5 minutes
-before processing anything. This prevents API contention when multiple
-coding sessions are active on the same subscription.
+Only processes sessions when `processing_mode=background` in
+~/.chronicle/config.json. In foreground mode (the default) this daemon
+does NOT exist; if a stale launchd/systemd service keeps it alive after
+the mode was flipped, it idles without reading events, scanning, or
+spawning `claude -p` — avoiding a KeepAlive restart loop.
 
-Processes sessions in parallel (5 workers via asyncio). Writes per-session
-markdown files and a cumulative chronicle.md per project.
+When background mode is active:
+- Polls ~/.chronicle/events.jsonl for hook events.
+- Uses a global debounce — waits until ALL sessions across ALL projects
+  have been quiet for `quiet_minutes` (default 5) before processing.
+  Prevents contention with active coding sessions on the same subscription.
+- Runs a periodic scanner (default every 30 min) that queues any JSONL
+  under ~/.claude/projects/ without an existing .processed / .failed marker.
+- Processes in parallel (default 5 workers via asyncio.Semaphore).
+- Holds ~/.chronicle/processing.lock across its batch so `chronicle process`
+  can't race. Terminates in-flight claude subprocesses on shutdown.
+- Writes per-session .md + cumulative chronicle.md; marks .processed/<hash>
+  on success, .failed/<hash>.json on transient / parse / terminal failure.
 
 Usage:
-    python -m chronicle.daemon          # run in foreground
-    python -m chronicle.daemon --bg     # daemonize
-    python -m chronicle.daemon --stop   # stop running daemon
+    python -m chronicle.daemon          # run in foreground (this process)
+    python -m chronicle.daemon --bg     # fork + setsid daemonize
+    python -m chronicle.daemon --stop   # SIGTERM the running daemon
     python -m chronicle.daemon --status # check if running
+
+Normal mode switching is `chronicle install-daemon` / `uninstall-daemon`,
+which manages the launchd plist / systemd unit. This module is the raw
+process; most users never invoke it directly.
 """
 
 import argparse

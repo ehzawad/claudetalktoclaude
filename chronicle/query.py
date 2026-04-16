@@ -1,10 +1,16 @@
 """Search and browse the Decision Chronicle.
 
+`query projects` reports per-project counts of processed / pending /
+terminal-failed sessions (not just a flat session count). `query
+sessions` resolves the current CWD's project slug and lists its
+session records, suggesting the correct `chronicle process --project
+<slug>` command if nothing is chronicled yet.
+
 Usage:
+    chronicle query projects                 # per-project OK / Pend / Fail
     chronicle query sessions                 # current project's chronicles
-    chronicle query projects                 # all chronicled projects
-    chronicle query timeline                 # recent sessions across all projects
-    chronicle query search "auth"            # full-text search
+    chronicle query timeline                 # recent sessions, all projects
+    chronicle query search "auth"            # full-text across all chronicles
 """
 
 import argparse
@@ -20,7 +26,8 @@ from .config import PROJECTS_DIR
 def search(query: str, project: str | None = None):
     """Full-text search across all chronicle markdown files."""
     if not PROJECTS_DIR.exists():
-        print("No chronicles found. Run the batch processor or daemon first.")
+        print("No chronicles found. Run `chronicle process` "
+              "or enable background mode with `chronicle install-daemon`.")
         return
 
     pattern = re.compile(re.escape(query), re.IGNORECASE)

@@ -6,10 +6,12 @@ Two processing modes:
 
 Usage:
     chronicle process [--project NAME] [--workers N] [--force] [--retry-failed] [--dry-run]
-        Process sessions into chronicle records. Runs claude -p to summarize.
+        Summarize pending sessions. --retry-failed retries terminal failures
+        after the underlying issue has been fixed. --force reprocesses
+        already-successful sessions.
 
     chronicle query projects
-        List all chronicled projects and any pending ones.
+        Per-project counts: processed / pending / terminal-failed.
     chronicle query sessions [PATH]
         Show chronicle.md and session files for a project.
     chronicle query timeline [--limit N]
@@ -27,15 +29,21 @@ Usage:
     chronicle story [project-name]
         Generate a unified project narrative (story.md) for stakeholders.
 
-    chronicle doctor
-        Diagnose: mode, resolved claude binary, daemon/service status, counts.
+    chronicle doctor [--json]
+        Diagnose: mode, resolved claude binary, daemon/service status,
+        drift warnings, counts. --json emits a schema-versioned document
+        (top-level `ok: bool`, `schema_version: 1`) for CI health checks.
 
-    chronicle daemon [--bg|--stop|--status]
-        Manage the background daemon process (in background mode).
     chronicle install-daemon
         Switch to background mode: install & start launchd/systemd service.
     chronicle uninstall-daemon
         Switch to foreground mode: stop & remove launchd/systemd service.
+
+    chronicle daemon [--bg|--stop|--status]
+        Internal / manual daemon control. Normal mode switching is
+        `install-daemon` / `uninstall-daemon` above — which manages the
+        service manager for you.
+
     chronicle reload
         Reinstall from source, fix symlinks, restart daemon if running.
 
