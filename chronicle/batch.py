@@ -39,6 +39,12 @@ from .storage import (
 from .summarizer import async_summarize_session
 
 
+# Interval at which `_process_one` emits a "still processing..." heartbeat
+# for long-running summarizations. A completed task short-circuits the wait,
+# so fast completions return immediately (they don't sit idle for this long).
+PROGRESS_INTERVAL_SECONDS = 15
+
+
 def find_all_sessions(project_filter: str | None = None) -> list[tuple[str, Path]]:
     """Find all session JSONL files across all projects."""
     if not CLAUDE_PROJECTS.exists():
@@ -72,11 +78,15 @@ async def _process_one(digest, semaphore):
 
         start = time.time()
 
-        # Run summarization with periodic progress dots
+        # Run summarization with periodic progress heartbeat. asyncio.wait
+        # returns as soon as the task completes OR the interval elapses —
+        # whichever is sooner — so a fast completion is observed immediately.
         task = asyncio.create_task(async_summarize_session(digest))
         while not task.done():
-            await asyncio.sleep(15)
-            if not task.done():
+            done, _pending = await asyncio.wait(
+                {task}, timeout=PROGRESS_INTERVAL_SECONDS,
+            )
+            if not done:
                 elapsed = int(time.time() - start)
                 print(f"  [{project_name}/{sid}] still processing... ({elapsed}s)")
 
@@ -183,6 +193,11 @@ async def async_batch_process(
     error_count = 0
 
     for digest, result in zip(eligible, results):
+        # Python 3.14: CancelledError is a BaseException, not Exception.
+        # Re-raise so Ctrl-C / SIGTERM propagates instead of being logged
+        # as a per-session error and quietly dropped.
+        if isinstance(result, BaseException) and not isinstance(result, Exception):
+            raise result
         if isinstance(result, Exception):
             print(f"  ERROR {digest.session_id[:8]}: {result}")
             error_count += 1

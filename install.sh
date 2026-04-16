@@ -163,6 +163,25 @@ fi
 EFFECTIVE_MODE=$("$INSTALL_DIR/.venv/bin/chronicle" doctor 2>/dev/null | grep -E "^mode:" | awk '{print $2}')
 [ -z "$EFFECTIVE_MODE" ] && EFFECTIVE_MODE="foreground"
 
+# If an in-flight daemon exists (upgrade scenario), force it to pick up the
+# new code now — launchctl/systemctl will respawn a fresh process. Best-effort:
+# any failure here does NOT block the install.
+if [ "$EFFECTIVE_MODE" = "background" ]; then
+    if [ "$OS" = "Darwin" ]; then
+        if launchctl print "gui/$(id -u)/com.chronicle.daemon" >/dev/null 2>&1; then
+            launchctl kickstart -k "gui/$(id -u)/com.chronicle.daemon" >/dev/null 2>&1 \
+                && echo "Kickstarted launchd daemon (new code active)." \
+                || echo "  (launchctl kickstart failed; daemon will pick up new code on next restart)"
+        fi
+    elif [ "$OS" = "Linux" ]; then
+        if systemctl --user is-active --quiet chronicle-daemon.service 2>/dev/null; then
+            systemctl --user restart chronicle-daemon.service \
+                && echo "Restarted systemd daemon (new code active)." \
+                || echo "  (systemctl restart failed; daemon will pick up new code on next restart)"
+        fi
+    fi
+fi
+
 # 10. Verify
 echo ""
 echo "Verifying installation..."
