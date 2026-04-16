@@ -124,11 +124,12 @@ def _mac_is_loaded() -> bool:
     return res.returncode == 0
 
 
-def _mac_install() -> None:
+def _mac_install() -> bool:
+    """Write plist and (re)bootstrap. Returns True if launchd accepted the job."""
     _MAC_PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
     _MAC_PLIST_PATH.write_text(_mac_plist_contents())
     _mac_bootout()
-    _mac_bootstrap()
+    return _mac_bootstrap()
 
 
 def _mac_uninstall() -> None:
@@ -168,11 +169,13 @@ def _linux_is_active() -> bool:
     return res.returncode == 0
 
 
-def _linux_install() -> None:
+def _linux_install() -> bool:
+    """Write unit and `enable --now`. Returns True if systemctl reports success."""
     _LINUX_UNIT_PATH.parent.mkdir(parents=True, exist_ok=True)
     _LINUX_UNIT_PATH.write_text(_linux_unit_contents())
     _linux_run(["systemctl", "--user", "daemon-reload"])
-    _linux_run(["systemctl", "--user", "enable", "--now", _LINUX_UNIT])
+    res = _linux_run(["systemctl", "--user", "enable", "--now", _LINUX_UNIT])
+    return res.returncode == 0
 
 
 def _linux_uninstall() -> None:
@@ -192,17 +195,21 @@ def platform_key() -> str:
     return "other"
 
 
-def install_service() -> None:
-    """Install and start the service on this platform. Idempotent."""
+def install_service() -> bool:
+    """Install and start the service on this platform. Idempotent.
+
+    Returns True if the service manager accepted the job. False means
+    the file was written but bootstrap/enable failed — caller should
+    surface this to the user via `chronicle doctor`.
+    """
     p = platform_key()
     if p == "macos":
-        _mac_install()
-    elif p == "linux":
-        _linux_install()
-    else:
-        raise RuntimeError(
-            f"Unsupported platform {sys.platform}; run `chronicle daemon` manually."
-        )
+        return _mac_install()
+    if p == "linux":
+        return _linux_install()
+    raise RuntimeError(
+        f"Unsupported platform {sys.platform}; run `chronicle daemon` manually."
+    )
 
 
 def uninstall_service() -> None:

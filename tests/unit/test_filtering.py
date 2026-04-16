@@ -48,7 +48,7 @@ def test_skip_project_matches_substring(isolated):
         "project in skip list"
 
 
-def test_already_chronicled(isolated):
+def test_success_marker_skipped_without_force(isolated):
     from chronicle import filtering, storage
     d = FakeDigest()
     storage.mark_succeeded(d.session_id, "", 0.0)

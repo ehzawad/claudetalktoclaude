@@ -1,13 +1,20 @@
 """Process existing Claude Code sessions into chronicle records.
 
-Supports parallel processing with configurable worker count (default 5).
-Auto-stops the daemon before processing to avoid races, restarts it after.
+This is the workhorse for BOTH modes:
+- Foreground (default): the only way sessions get summarized. Run on demand.
+- Background: still works; pauses the launchd/systemd service via service.py
+  and holds ~/.chronicle/processing.lock so the daemon can't race.
+
+Supports parallel processing (default 5 workers), --force to reprocess
+successful sessions, and --retry-failed to retry sessions whose
+.failed/<hash>.json marker is terminal.
 
 Usage:
-    chronicle process                                  # process all new sessions
+    chronicle process                                  # process pending sessions
     chronicle process --dry-run                        # preview without processing
-    chronicle process --project bada --workers 5       # one project (folder name)
-    chronicle process --force --workers 5              # reprocess everything
+    chronicle process --project bada --workers 5       # substring-match one project
+    chronicle process --force --workers 5              # reprocess successes
+    chronicle process --retry-failed --workers 5       # retry terminal failures
 """
 
 import argparse

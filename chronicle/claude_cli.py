@@ -14,10 +14,12 @@ Solves three cross-cutting concerns:
 Also maintains a registry of in-flight subprocesses so daemon shutdown
 can terminate them instead of orphaning them.
 
-POSIX note: asyncio.create_subprocess_exec resolves the executable using
-the CALLING process's PATH (via posix_spawnp / execvp). The `env=` kwarg
-only controls what the CHILD sees. This module passes an absolute path
-to sidestep that subtlety.
+Why we pass an absolute path: Python's subprocess lookup for the
+executable when `env=` is supplied is implementation-dependent across
+POSIX platforms — some paths use the parent's PATH, some use env[PATH].
+Passing an already-resolved absolute path sidesteps the ambiguity and
+guarantees the daemon finds `claude` regardless of who spawned it
+(launchd, systemd, hook, or interactive shell).
 """
 
 import asyncio
@@ -176,6 +178,7 @@ async def terminate_active_subprocesses(grace_seconds: float = 5.0) -> dict:
     """Terminate all in-flight claude subprocesses. Called on daemon shutdown.
 
     Sends SIGTERM, waits up to grace_seconds, then SIGKILL stragglers.
+    Always reaps via wait() after kill to avoid zombies.
     Returns {"terminated": N, "killed": M} for logging.
     """
     if not _active_procs:
@@ -195,6 +198,12 @@ async def terminate_active_subprocesses(grace_seconds: float = 5.0) -> dict:
                 killed += 1
             except ProcessLookupError:
                 pass
+    # Reap all victims so we don't leave zombies.
+    for p in victims:
+        try:
+            await asyncio.wait_for(p.wait(), timeout=2.0)
+        except (asyncio.TimeoutError, ProcessLookupError):
+            pass
     return {"terminated": len(victims), "killed": killed}
 
 

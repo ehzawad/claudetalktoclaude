@@ -136,17 +136,21 @@ def sessions(project_path: str | None = None):
         if claude_sessions.exists():
             jsonl_count = len(list(claude_sessions.glob("*.jsonl")))
             if jsonl_count:
+                from .mode import is_background_mode
                 from .daemon import _is_running
                 running, pid = _is_running()
-                if running:
-                    print(f"Not yet processed. {jsonl_count} session(s) pending for '{cwd}'")
-                    print(f"Daemon is running (pid {pid}) — will process after 5 minutes of inactivity.")
-                    print(f"\nTo process now:")
-                    print(f"  chronicle process --project {cwd} --workers 5")
+                bg = is_background_mode()
+                print(f"Not yet processed. {jsonl_count} session(s) found for '{cwd}'")
+                if bg and running:
+                    print(f"Daemon is running (pid {pid}) — will process after "
+                          f"5 minutes of inactivity.")
+                elif bg and not running:
+                    print("Mode=background but daemon is not running. "
+                          "Run `chronicle doctor`.")
                 else:
-                    print(f"Not yet processed. {jsonl_count} session(s) found for '{cwd}'")
-                    print(f"Daemon is not running. Process manually:")
-                    print(f"  chronicle process --project {cwd} --workers 5")
+                    print("Mode=foreground — summarization only happens on demand.")
+                print("\nTo process now:")
+                print(f"  chronicle process --project {cwd} --workers 5")
                 return
         print(f"No sessions found for '{cwd}'")
         return

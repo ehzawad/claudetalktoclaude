@@ -1,8 +1,10 @@
 """Per-project insight from chronicle session data.
 
-Generates an LLM-synthesized HTML report via `claude -p`. Aggregates session
-data in Python, sends it to Claude for narrative analysis and HTML generation,
-writes the result to ~/.chronicle/projects/<slug>/insight.html and opens it.
+Generates an LLM-synthesized HTML report via `claude -p` (through the
+shared chronicle.claude_cli wrapper, so PATH resolution and auth-var
+stripping happen in one place). Aggregates session data in Python,
+sends it to Claude for narrative analysis + HTML generation, writes
+the result to ~/.chronicle/projects/<slug>/insight.html and opens it.
 
 Usage:
     chronicle insight [project]     # project name (substring match)
@@ -12,6 +14,7 @@ Usage:
 import argparse
 import asyncio
 import json
+import os
 import re
 import sys
 import webbrowser

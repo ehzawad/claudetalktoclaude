@@ -1,13 +1,16 @@
 """Hook dispatcher for Claude Code events.
 
-Handles four events:
-- SessionStart (sync): auto-spawns daemon, injects recent decisions as additionalContext
-- Stop (async): logs event for daemon processing
-- UserPromptSubmit (async): logs event, resets daemon's global debounce timer
-- SessionEnd (async): logs event for daemon processing
+Behavior is identical in foreground and background modes EXCEPT for the
+daemon-spawn step on SessionStart:
 
-All async hooks just append to events.jsonl and exit. They never return
-decisions, never block the session, never modify behavior.
+- SessionStart (sync): always appends event, always injects past session
+  titles as `additionalContext`. In background mode only, respawns the
+  daemon if it's dead. In foreground mode, never spawns the daemon.
+- UserPromptSubmit / Stop / SessionEnd (async): always append to
+  events.jsonl and exit. Never return decisions, never block.
+
+Hooks never call `claude -p` — summarization is gated behind explicit
+user commands or the (opt-in) background daemon.
 """
 
 import json

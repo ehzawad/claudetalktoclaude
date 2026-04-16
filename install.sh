@@ -144,14 +144,24 @@ mkdir -p "$HOME/.claude"
 # 8. Set secure permissions
 chmod 700 "$HOME/.chronicle" 2>/dev/null || true
 
-# 9. Optional: enable background mode if user explicitly opted in via env var
-if [ "${CHRONICLE_MODE:-foreground}" = "background" ]; then
+# 9. Reconcile processing mode. Upgrade users may have an existing
+#    config.json saying "background" — respect it unless CHRONICLE_MODE
+#    explicitly overrides. Fresh installs default to foreground.
+if [ "${CHRONICLE_MODE:-}" = "background" ]; then
     echo ""
     echo "CHRONICLE_MODE=background set — installing background daemon..."
     "$INSTALL_DIR/.venv/bin/chronicle" install-daemon || {
-        echo "  (daemon install failed; you can run \`chronicle install-daemon\` manually later)"
+        echo "  (daemon install failed; run \`chronicle install-daemon\` manually later)"
     }
+elif [ "${CHRONICLE_MODE:-}" = "foreground" ]; then
+    echo ""
+    echo "CHRONICLE_MODE=foreground set — uninstalling any prior daemon..."
+    "$INSTALL_DIR/.venv/bin/chronicle" uninstall-daemon 2>/dev/null || true
 fi
+
+# Show the live mode (so upgrade users aren't misled by the default message)
+EFFECTIVE_MODE=$("$INSTALL_DIR/.venv/bin/chronicle" doctor 2>/dev/null | grep -E "^mode:" | awk '{print $2}')
+[ -z "$EFFECTIVE_MODE" ] && EFFECTIVE_MODE="foreground"
 
 # 10. Verify
 echo ""
@@ -163,9 +173,9 @@ if command -v chronicle-hook >/dev/null 2>&1 && command -v chronicle >/dev/null 
     echo ""
     echo "Installation complete!"
     echo ""
-    echo "Mode: ${CHRONICLE_MODE:-foreground} (default is foreground)"
+    echo "Mode: ${EFFECTIVE_MODE} (default is foreground; switch via chronicle install-daemon / uninstall-daemon)"
     echo ""
-    if [ "${CHRONICLE_MODE:-foreground}" = "foreground" ]; then
+    if [ "$EFFECTIVE_MODE" = "foreground" ]; then
         echo "Foreground mode: hooks record session events and inject past titles"
         echo "into new Claude Code sessions. Summarization happens only when you"
         echo "explicitly run one of:"

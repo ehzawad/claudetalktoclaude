@@ -131,8 +131,8 @@ async def _process_batch(events: list[tuple[str, dict]], config: dict) -> list[t
         # transient failure that hasn't hit max retries yet, or an INFRA
         # error that doesn't count against retries.
         if (entry.is_error
-                and not already_succeeded(digest.session_id)
-                and already_failed(digest.session_id) is None):
+                and not is_succeeded(digest.session_id)
+                and not is_terminal_failure(digest.session_id)):
             for sid, ev in events:
                 if sid == digest.session_id:
                     retry.append((sid, ev))

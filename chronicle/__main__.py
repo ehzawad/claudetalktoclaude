@@ -98,13 +98,19 @@ def install_daemon():
     from .mode import set_processing_mode
 
     try:
-        service.install_service()
+        accepted = service.install_service()
     except RuntimeError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
     set_processing_mode("background")
 
-    print("Installed background daemon and set processing_mode=background.")
+    if accepted:
+        print("Installed background daemon and set processing_mode=background.")
+    else:
+        print("Service file written, but the service manager did NOT start the daemon cleanly.",
+              file=sys.stderr)
+        print("processing_mode=background is set; run `chronicle doctor` for details.",
+              file=sys.stderr)
     print()
     if sys.platform == "darwin":
         print("macOS launchd service:")

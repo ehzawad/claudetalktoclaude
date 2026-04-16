@@ -186,167 +186,174 @@ This means you can install chronicle on a machine with months of Claude Code his
 
 ## Architecture
 
-### System overview
+### System overview — the two modes
 
-How all the pieces connect — from Claude Code sessions to markdown output:
+Mode is orthogonal. Hooks behave identically. The daemon is opt-in.
 
 ```mermaid
 flowchart TB
-    subgraph cc["Claude Code Sessions"]
-        S1["Session: Project A"]
-        S2["Session: Project B"]
-        S3["Session: Project C"]
+    subgraph cc["Claude Code sessions"]
+        S["Any session"]
     end
 
-    subgraph hooks["Hook Layer (hook.py)"]
-        direction TB
-        SS["SessionStart<br/>(sync)"]
-        UP["UserPromptSubmit<br/>(async)"]
-        ST["Stop / SessionEnd<br/>(async)"]
-        EQ[("~/.chronicle/<br/>events.jsonl")]
+    subgraph hooks["Hooks (hook.py)"]
+        SS["SessionStart (sync):<br/>inject past titles"]
+        LOG["UserPromptSubmit / Stop / SessionEnd:<br/>append to events.jsonl"]
     end
 
-    subgraph daemon["Background Daemon (daemon.py)"]
-        direction TB
-        PL["Poll events.jsonl<br/>every 5 seconds"]
-        DE["Global Debounce<br/>5 min quiet across ALL projects"]
-        SC["Periodic Scanner<br/>every 30 min scan ~/.claude/projects/"]
-        PD{{"Pending<br/>sessions"}}
-        SEM["Semaphore<br/>5 parallel workers"]
+    MODE{"processing_mode ?"}
+
+    subgraph fg["Foreground (default)"]
+        FG1["Nothing auto-processes"]
+        FG2["User runs explicit command:<br/>chronicle process | insight | story"]
     end
 
-    subgraph pipeline["Processing Pipeline"]
-        direction TB
-        EX["Extract JSONL<br/>(extractor.py)"]
-        FI["Filter<br/>(filtering.py)"]
-        RD["Redact Secrets<br/>(extractor.py)"]
-        SM["claude -p<br/>--json-schema --effort max<br/>--fallback-model sonnet<br/>(summarizer.py)"]
+    subgraph bg["Background (chronicle install-daemon)"]
+        D1["Daemon polls events.jsonl"]
+        D2["Debounce 5 min quiet<br/>+ periodic 30 min scan"]
+        D3["Semaphore: 5 parallel workers"]
     end
 
-    subgraph output["Output (storage.py)"]
-        direction TB
-        SF["Per-session .md"]
-        CM["chronicle.md<br/>(cumulative)"]
-        MK[".processed/<br/>marker + cost"]
-    end
+    PIPE["Summarization pipeline<br/>(claude_cli.spawn_claude)"]
+    OUT["Per-session .md<br/>+ chronicle.md<br/>+ .processed/ OR .failed/"]
 
-    S1 & S2 & S3 --> SS & UP & ST
-    SS -->|"spawn daemon<br/>if not running"| PL
-    SS -->|"inject past<br/>decisions"| S1 & S2 & S3
-    SS & UP & ST --> EQ
-    EQ --> PL
-    PL --> DE
-    UP -->|"reset debounce<br/>timer"| DE
-    SC -->|"find sessions<br/>without events"| PD
-    DE -->|"all quiet<br/>for 5 min"| PD
-    PD --> SEM
-    SEM --> EX --> FI --> RD --> SM
-    SM -->|"structured_output<br/>+ total_cost_usd"| SF & CM & MK
+    S --> SS & LOG
+    SS -.->|context only| S
+    LOG --> MODE
+    MODE -->|foreground| fg
+    MODE -->|background| bg
+    FG2 --> PIPE
+    D3 --> PIPE
+    PIPE --> OUT
 ```
 
-### Daemon lifecycle
+### Processing mode gate
 
-What the daemon does from startup to processing:
+In foreground mode, nothing calls `claude -p` automatically. The daemon, if present, detects the mode and idles.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Hook as Hook (always runs)
+    participant Cfg as config.json
+    participant Daemon as Daemon<br/>(background only)
+    participant API as claude -p
+
+    Note over User,API: Session in progress
+    Hook->>Hook: append event to events.jsonl
+    Hook->>Cfg: read processing_mode
+    alt mode == "background" (opt-in)
+        Hook->>Daemon: spawn if dead
+        Note over Daemon: 5 min quiet debounce
+        Daemon->>Cfg: re-read mode each tick
+        Daemon-->>API: spawn summarization
+        API-->>Daemon: structured_output
+    else mode == "foreground" (default)
+        Hook--xDaemon: do NOT spawn
+        Note over User: User runs chronicle process
+        User->>API: spawn summarization (on demand)
+        API-->>User: structured_output
+    end
+```
+
+### Marker state machine
+
+Every session lives in one of four states. Transitions are driven by summarization outcomes (success / transient error / terminal error) and explicit user commands (`--force`, `--retry-failed`).
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Starting: chronicle daemon --bg<br/>or hook spawns it
+    [*] --> Unprocessed: new JSONL
 
-    Starting --> AcquireLock: PID file + fcntl flock
-    AcquireLock --> Running: lock acquired
-    AcquireLock --> [*]: another daemon owns lock
+    Unprocessed --> Success: claude -p ok
+    Unprocessed --> Retriable: transient or parse error
+    Retriable --> Success: retry ok
+    Retriable --> Retriable: another transient
+    Retriable --> Terminal: attempts == max_retries
 
-    Running --> Polling: every 5 seconds
+    Success: .processed/&lt;hash&gt; written<br/>+ session .md
+    Retriable: .failed/&lt;hash&gt;.json<br/>terminal=false<br/>attempts &lt; max
+    Terminal: .failed/&lt;hash&gt;.json<br/>terminal=true
 
-    state Polling {
-        [*] --> ReadEvents: read events.jsonl<br/>from byte offset
-        ReadEvents --> CategorizeEvents
-        CategorizeEvents --> CheckDebounce
-        CheckDebounce --> ScanCheck: check if 30min<br/>since last scan
+    Terminal --> Unprocessed: chronicle process --retry-failed
+    Success --> Unprocessed: chronicle process --force
 
-        state ScanCheck {
-            [*] --> ScanNeeded: time elapsed >= 30min
-            ScanNeeded --> ScanProjects: walk ~/.claude/projects/
-            ScanProjects --> QueueUnprocessed: add sessions<br/>without events
-            [*] --> ScanSkipped: too soon
-        }
-
-        ScanCheck --> WaitOrProcess
-
-        state WaitOrProcess {
-            [*] --> StillActive: UserPromptSubmit<br/>seen recently
-            StillActive --> ResetTimer: remove session<br/>from pending
-            [*] --> AllQuiet: 5 min silence<br/>across ALL projects
-            AllQuiet --> ProcessBatch: dispatch to<br/>parallel workers
-        }
+    state Unprocessed {
+        direction LR
+        [*] --> infra_error: claude missing / auth failed
+        infra_error --> [*]: no retry budget consumed
     }
-
-    Polling --> ValidateLock: check inode<br/>matches PID file
-    ValidateLock --> Polling: still valid
-    ValidateLock --> [*]: PID file replaced<br/>by another daemon
-
-    Running --> [*]: SIGTERM / SIGINT / SIGHUP
 ```
 
-### Hook event flow
+### Error classification
 
-What happens at each lifecycle event in a Claude Code session:
+Not every failure is the same. Infra errors (missing binary, auth) are a daemon-level problem, not a session problem — they never charge a session's retry budget.
+
+```mermaid
+flowchart LR
+    CALL["spawn_claude()"] --> RC{"returncode<br/>== 0 ?"}
+    RC -- no --> ERRSNIFF{"auth / command-not-found<br/>stderr hint?"}
+    ERRSNIFF -- yes --> INFRA
+    ERRSNIFF -- no --> TRANS
+    RC -- yes --> PARSE{"outer JSON<br/>parseable ?"}
+    PARSE -- no --> PERR["ErrorKind.PARSE<br/>(counts as retry)"]
+    PARSE -- yes --> ISERR{"outer.is_error ?"}
+    ISERR -- yes --> TRANS["ErrorKind.TRANSIENT<br/>(counts as retry)"]
+    ISERR -- no --> OK["Success<br/>.processed/&lt;hash&gt;"]
+    INFRA["ErrorKind.INFRA<br/>(does NOT count as retry;<br/>logs once per daemon lifetime)"] --> FIX["User fixes PATH /<br/>auth; next tick retries"]
+```
+
+### Claude binary resolution
+
+Daemons spawned by launchd/systemd inherit a minimal PATH. chronicle_cli resolves `claude` once at spawn time using `shutil.which` plus fallback dirs, then reuses the absolute path.
+
+```mermaid
+flowchart TB
+    NEED["spawn_claude(...)"] --> CACHED{"cached path?"}
+    CACHED -- yes --> USE["use cached"]
+    CACHED -- no --> WHICH["shutil.which('claude')"]
+    WHICH -- found --> CACHE["cache + use"]
+    WHICH -- miss --> FB["fallback dirs:<br/>~/.local/bin<br/>/opt/homebrew/bin<br/>/usr/local/bin"]
+    FB -- found --> CACHE
+    FB -- miss --> MISSING["ClaudeNotFound<br/>→ ErrorKind.INFRA"]
+    USE --> EXEC["asyncio.create_subprocess_exec<br/>with sanitized env<br/>(no ANTHROPIC_API_KEY /<br/>AUTH_TOKEN / BASE_URL)"]
+    CACHE --> EXEC
+```
+
+### Hook event flow (background mode)
+
+In background mode, the daemon watches events.jsonl and processes sessions after quiet time. (In foreground mode, the daemon is absent — only the hook-logging rows fire; summarization waits until you run `chronicle process`.)
 
 ```mermaid
 sequenceDiagram
     participant CC as Claude Code
     participant H as chronicle-hook
     participant EQ as events.jsonl
-    participant D as Daemon
+    participant D as Daemon (bg only)
     participant API as claude -p
-    participant FS as Markdown Files
+    participant FS as ~/.chronicle/
 
     Note over CC,FS: Session begins
-
     CC->>H: SessionStart (sync)
-    H->>EQ: append {session_id, transcript_path, cwd}
-    H->>H: check daemon PID file
-    alt daemon not running
-        H->>D: subprocess.Popen(chronicle.daemon)
-    end
-    H->>H: load recent titles from sessions/*.md
-    H-->>CC: {"additionalContext": "Previous sessions:\\n- title1\\n- title2"}
+    H->>EQ: append event
+    H->>H: load past session titles
+    H-->>CC: additionalContext (past titles)
 
-    Note over CC,FS: User works normally
-
-    CC->>H: UserPromptSubmit (async)
-    H->>EQ: append {session_id, prompt}
-    Note over D: debounce timer resets<br/>removes session from pending
-
+    Note over CC,FS: User works; hooks keep logging
     CC->>H: UserPromptSubmit (async)
     H->>EQ: append event
-    Note over D: debounce resets again
+    CC->>H: Stop / SessionEnd (async)
+    H->>EQ: append event
 
-    CC->>H: Stop (async)
-    H->>EQ: append {session_id, transcript_path}
-    Note over D: session added to pending
-
-    CC->>H: SessionEnd (async)
-    H->>EQ: append {session_id, reason}
-
-    Note over D: 5 minutes of silence...
-
+    Note over D: (background only)<br/>poll + debounce + scan<br/>until 5 min quiet
     D->>EQ: read new events from offset
-    D->>D: categorize: Stop/SessionEnd → pending
-    D->>D: all quiet? yes → process batch
-
-    par parallel workers (up to 5)
-        D->>D: extract_session(transcript.jsonl)
-        D->>D: redact secrets from tool outputs
-        D->>API: stdin: summarization prompt + transcript
-        Note over API: claude -p --json-schema<br/>--effort max<br/>--fallback-model sonnet<br/>--no-session-persistence<br/>env: ANTHROPIC_API_KEY stripped
-        API-->>D: {"structured_output": {...}, "total_cost_usd": 0.15}
+    D->>D: acquire processing.lock
+    par workers (up to 5)
+        D->>API: claude -p --json-schema<br/>(sanitized env)
+        API-->>D: structured_output
     end
-
-    D->>FS: write session .md (per-session record)
-    D->>FS: append to chronicle.md (timeline + detail)
-    D->>FS: mark .processed/{hash} (with cost)
-    D->>D: save events.jsonl offset
+    D->>FS: write .md + .processed/hash
+    Note over D,FS: on error:<br/>INFRA → log only, no retry charge<br/>TRANSIENT/PARSE → .failed/hash.json<br/>at max_retries → terminal=true
+    D->>D: release processing.lock
 ```
 
 ### Session processing pipeline
@@ -405,11 +412,9 @@ flowchart TB
 
     subgraph write["Write (storage.py)"]
         direction TB
-        W1["write_session_record()<br/>→ sessions/date_id_title.md"]
-        W2["append_to_chronicle()<br/>→ chronicle.md timeline + detail"]
-        W3["rebuild_prompts_section()<br/>→ chronological prompts at end"]
-        W4["mark_chronicled()<br/>→ .processed/{hash} with cost"]
-        W1 --> W2 --> W3 --> W4
+        W1["on success:<br/>write_session_record() → sessions/date_id_title.md<br/>append_to_chronicle() → chronicle.md timeline<br/>rebuild_prompts_section()<br/>mark_succeeded() → .processed/&lt;hash&gt;"]
+        W2["on transient/parse error:<br/>record_failed_attempt() → .failed/&lt;hash&gt;.json<br/>terminal=true once attempts reaches max_retries"]
+        W3["on infra error (missing claude, auth):<br/>log only, don't charge retry budget"]
     end
 
     JSONL --> extract
@@ -426,34 +431,29 @@ flowchart TB
 
 ### `chronicle process`
 
-Manually trigger processing for all or specific projects:
+Explicitly summarize pending sessions. In background mode, pauses the service manager first and holds the processing lock; in foreground mode, just holds the lock.
 
 ```mermaid
 flowchart TB
-    CMD["chronicle process<br/>--project [name] --workers 5 --force"]
-
-    CMD --> STOP["Stop running daemon<br/>(wait up to 30s, SIGKILL if stuck)"]
-    STOP --> SCAN["Scan ~/.claude/projects/*/<br/>Substring match against slugs<br/>→ find *.jsonl session files"]
-    SCAN --> FILTER{"For each session:<br/>--force?"}
-    FILTER -->|"--force"| ELIGIBLE["Add to eligible"]
-    FILTER -->|"no --force"| CHECK{"already_chronicled?<br/>self-session?<br/>skip_projects?"}
-    CHECK -->|skip| SKIP["Skip"]
-    CHECK -->|eligible| ELIGIBLE
-
-    ELIGIBLE --> PARALLEL["Process in parallel<br/>(N workers via asyncio.Semaphore)"]
-
-    subgraph worker["Each worker"]
-        direction TB
-        WE["extract_session()"]
-        WS["async_summarize_session()"]
-        WW["write_session_record()"]
-        WC["append_to_chronicle()"]
-        WE --> WS --> WW --> WC
-    end
-
-    PARALLEL --> worker
-    worker --> RESTART["Restart daemon"]
-    RESTART --> SUMMARY["Print summary:<br/>Processed: N<br/>Skipped: N<br/>Already done: N"]
+    CMD["chronicle process [--project N] [--workers 5]<br/>[--force] [--retry-failed] [--dry-run]"]
+    CMD --> MODE{"mode == background ?"}
+    MODE -- yes --> PAUSE["service.pause_service()<br/>(launchctl bootout / systemctl stop)"]
+    MODE -- no --> SKIPPAUSE["(no daemon to pause)"]
+    PAUSE --> LOCK
+    SKIPPAUSE --> LOCK
+    LOCK["acquire ~/.chronicle/processing.lock<br/>(blocking)"]
+    LOCK --> SCAN["scan ~/.claude/projects/*/<br/>extract each JSONL"]
+    SCAN --> FILTER{"should_skip?"}
+    FILTER -- "already chronicled" --> SKIPSUCC["skip (unless --force)"]
+    FILTER -- "terminal failure" --> SKIPFAIL["skip (unless --retry-failed or --force)"]
+    FILTER -- "skip-project / self-session" --> SKIPOTH["skip"]
+    FILTER -- "None" --> ELIGIBLE["eligible"]
+    ELIGIBLE --> PARALLEL["asyncio.Semaphore(workers)<br/>parallel summarize via claude_cli"]
+    PARALLEL --> WRITE["write_chronicle() →<br/>.processed/&lt;hash&gt; OR .failed/&lt;hash&gt;.json"]
+    WRITE --> RESUME{"paused earlier?"}
+    RESUME -- yes --> RESUMESVC["service.resume_service()"]
+    RESUME -- no --> DONE["summary: processed / skipped / failed"]
+    RESUMESVC --> DONE
 ```
 
 ### `chronicle query`

@@ -117,7 +117,9 @@ def clear_failed(session_id: str):
 
 
 def list_failed(*, terminal_only: bool = False) -> list[dict]:
-    """Return failure records (terminal + in-progress). Used by query/doctor."""
+    """Return failure records. Default returns BOTH terminal and in-progress;
+    pass terminal_only=True to filter to only terminal=true records.
+    Used by query/doctor."""
     _ensure_dir(FAILED_DIR)
     out = []
     for p in sorted(FAILED_DIR.glob("*.json")):
@@ -187,8 +189,6 @@ def clear_session_markers(session_id: str):
             continue
 
 
-# Legacy-name alias retained for the one internal caller (storage.delete_session).
-unmark_chronicled = clear_session_markers
 
 
 def delete_session(session_path, slug: str):
@@ -224,10 +224,10 @@ def delete_session(session_path, slug: str):
     # Remove session .md file
     session_path.unlink()
 
-    # Remove processed marker — try full UUID first, then short ID
-    unmark_chronicled(full_id)
+    # Clear all markers — try full UUID first, then short ID
+    clear_session_markers(full_id)
     if full_id != short_id:
-        unmark_chronicled(short_id)
+        clear_session_markers(short_id)
 
     # Rebuild prompts section
     rebuild_prompts_section(slug)

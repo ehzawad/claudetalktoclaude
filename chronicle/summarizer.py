@@ -1,12 +1,14 @@
-"""Call Claude (via `claude -p`) to summarize session content into decisions.
+"""Session summarization via the Claude CLI.
 
-Uses `claude -p --model <model>` for summarization via your paid subscription.
-Subprocess env + PATH + auth-var stripping all live in `claude_cli`.
+Builds a SESSION prompt from the extracted transcript and invokes
+`claude -p --json-schema` via chronicle.claude_cli.spawn_claude (which
+handles binary resolution, env sanitization, subprocess registry, and
+error classification).
 
-Uses --json-schema for validated structured output and --effort max for
-thorough reasoning. Falls back to --fallback-model when primary is overloaded.
+Uses --effort max for thorough reasoning and --fallback-model for
+resilience when the primary model is overloaded.
 
-Provides `async_summarize_session()` for parallel processing of multiple sessions.
+Provides `async_summarize_session()` for parallel processing.
 """
 
 import asyncio
