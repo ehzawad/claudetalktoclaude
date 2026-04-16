@@ -24,9 +24,7 @@ import sys
 import time
 from pathlib import Path
 
-from .config import (
-    chronicle_dir, claude_projects, load_config, save_default_config,
-)
+from .config import claude_projects, load_config, save_default_config
 from .extractor import extract_session
 from .filtering import should_skip
 from .locks import processing_lock
