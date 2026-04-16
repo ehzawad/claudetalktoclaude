@@ -19,7 +19,6 @@ launched by a service manager that doesn't source shell profiles.
 from __future__ import annotations
 
 import os
-import shlex
 import shutil
 import subprocess
 import sys

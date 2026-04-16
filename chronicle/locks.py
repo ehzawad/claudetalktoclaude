@@ -18,7 +18,6 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import os
-from pathlib import Path
 from typing import Iterator, Optional
 
 from .config import pid_file, processing_lock_path

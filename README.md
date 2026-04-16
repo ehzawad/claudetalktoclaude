@@ -347,4 +347,4 @@ chronicle/
   install_hooks.py     # idempotent ~/.claude/settings.json hook merge
 ```
 
-Tests: `tests/unit/` (per-module) + `tests/functional/` (subprocess-level end-to-end with a fake `claude` stub). 68 tests in ~5s.
+Tests: `tests/unit/` (per-module) + `tests/functional/` (subprocess-level end-to-end with a fake `claude` stub). Runs in a few seconds — see `pytest -q` for the current count.

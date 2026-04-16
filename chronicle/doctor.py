@@ -19,7 +19,7 @@ from typing import Any, Sequence
 from . import service
 from .claude_cli import try_resolve_claude_binary
 from .config import (
-    chronicle_dir, claude_projects, config_file, failed_dir,
+    chronicle_dir, claude_projects, config_file,
     processed_dir, processing_lock_path,
 )
 from .locks import daemon_is_running, processing_lock_held
@@ -57,6 +57,7 @@ def collect_diagnostics() -> dict[str, Any]:
     consume this dict without mutating it.
     """
     from . import __version__
+    from .config import load_config
 
     mode = get_processing_mode()
     claude_bin = try_resolve_claude_binary()
@@ -70,11 +71,22 @@ def collect_diagnostics() -> dict[str, Any]:
         len(list(processed_dir().glob("*"))) if processed_dir().exists() else 0
     )
 
-    drift_warnings = service.mode_drift_warnings()
+    drift_warnings = list(service.mode_drift_warnings())
+    # Surface a corrupt config.json loudly. The rest of the system falls
+    # back to DEFAULT_CONFIG silently (so the daemon doesn't crash on every
+    # tick), but the user needs to know.
+    cfg = load_config()
+    config_error = cfg.get("_load_error")
+    if config_error:
+        drift_warnings.insert(0, f"config load error: {config_error}")
 
     return {
         "schema_version": 1,
-        "ok": not drift_warnings and claude_bin is not None,
+        "ok": (
+            not drift_warnings
+            and claude_bin is not None
+            and config_error is None
+        ),
         "version": __version__,
         "chronicle_binary": shutil.which("chronicle"),
         "mode": mode,

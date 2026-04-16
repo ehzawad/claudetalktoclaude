@@ -54,9 +54,29 @@ def install_hooks(settings_path: str):
     path = Path(settings_path)
 
     if path.exists():
-        settings = json.loads(path.read_text())
+        try:
+            raw = path.read_text()
+            settings = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError as e:
+            # Don't silently clobber the user's settings — refuse and
+            # tell them exactly where to look.
+            print(
+                f"ERROR: {path} is not valid JSON ({e}).\n"
+                f"Chronicle will not overwrite it. Fix the file, or back it up and retry:\n"
+                f"  cp {path} {path}.bak && echo '{{}}' > {path}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
     else:
         settings = {}
+
+    if not isinstance(settings, dict):
+        print(
+            f"ERROR: {path} top-level JSON is not an object. "
+            f"Refusing to overwrite. Back it up and fix manually.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     hooks = settings.get("hooks", {})
 

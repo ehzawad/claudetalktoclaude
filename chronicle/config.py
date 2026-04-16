@@ -88,11 +88,25 @@ DEFAULT_CONFIG = {
 # ---------- Config read/write ----------
 
 def load_config() -> dict:
-    if config_file().exists():
-        with open(config_file()) as f:
+    """Return the merged config dict. Never raises.
+
+    If ~/.chronicle/config.json is malformed (invalid JSON, permission
+    denied, etc.), fall back to DEFAULT_CONFIG with a `_load_error` key
+    so `chronicle doctor` can surface the problem without the hook /
+    daemon / batch crashing on every invocation.
+    """
+    cf = config_file()
+    if not cf.exists():
+        return dict(DEFAULT_CONFIG)
+    try:
+        with open(cf) as f:
             user_config = json.load(f)
+        if not isinstance(user_config, dict):
+            return {**DEFAULT_CONFIG, "_load_error":
+                    f"{cf}: top-level JSON is not an object"}
         return {**DEFAULT_CONFIG, **user_config}
-    return dict(DEFAULT_CONFIG)
+    except (OSError, json.JSONDecodeError) as e:
+        return {**DEFAULT_CONFIG, "_load_error": f"{cf}: {e}"}
 
 
 def save_default_config():

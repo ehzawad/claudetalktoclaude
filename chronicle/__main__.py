@@ -101,16 +101,24 @@ def main():
 
 
 def install_daemon():
-    """Switch to background mode: write service file + bootstrap + set config."""
+    """Switch to background mode: flip config BEFORE starting the service,
+    so the freshly-spawned daemon sees background on its very first tick
+    rather than booting, idling in foreground, then flipping later.
+    """
     from . import service
     from .mode import set_processing_mode
 
+    # Flip mode first — the daemon re-reads config on every loop iteration
+    # and the self-disable check happens at the top of that loop, so
+    # ordering matters.
+    set_processing_mode("background")
     try:
         accepted = service.install_service()
     except RuntimeError as e:
         print(f"ERROR: {e}", file=sys.stderr)
+        # Roll back mode so doctor doesn't lie about intent.
+        set_processing_mode("foreground")
         sys.exit(1)
-    set_processing_mode("background")
 
     if accepted:
         print("Installed background daemon and set processing_mode=background.")
@@ -212,19 +220,27 @@ def reload_install():
     settings_file = Path.home() / ".claude" / "settings.json"
     install_hooks(str(settings_file))
 
-    # Restart daemon if it was running before reload
+    # Restart daemon only if we're in background mode. If the user is in
+    # foreground, a stale daemon was running unexpectedly; don't respawn
+    # it — let launchd/systemd decide, or let `chronicle doctor` flag
+    # the drift.
     if daemon_was_running:
         from .config import chronicle_dir
-        log_file = chronicle_dir() / "daemon.log"
-        with open(log_file, "a") as log_fd:
-            subprocess.Popen(
-                [str(venv_dir / "bin" / "python"), "-m", "chronicle.daemon"],
-                start_new_session=True,
-                stdin=subprocess.DEVNULL,
-                stdout=log_fd,
-                stderr=log_fd,
-            )
-        print("Restarted daemon with new code.")
+        from .mode import is_background_mode
+        if is_background_mode():
+            log_file = chronicle_dir() / "daemon.log"
+            with open(log_file, "a") as log_fd:
+                subprocess.Popen(
+                    [str(venv_dir / "bin" / "python"), "-m", "chronicle.daemon"],
+                    start_new_session=True,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_fd,
+                    stderr=log_fd,
+                )
+            print("Restarted daemon with new code.")
+        else:
+            print("Daemon was running but mode=foreground; leaving stopped. "
+                  "Run `chronicle doctor` if you see drift.")
 
     print("\nReload complete.")
 

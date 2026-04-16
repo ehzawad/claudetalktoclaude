@@ -29,7 +29,23 @@ if ! command -v git >/dev/null 2>&1; then
     MISSING="$MISSING git"
 fi
 
-if ! command -v claude >/dev/null 2>&1; then
+# `claude` may be installed at ~/.local/bin/claude etc. but not on the
+# caller's PATH at preflight time — later in this script we add
+# ~/.local/bin to PATH and the runtime resolver (claude_cli) will find
+# it via fallback dirs. Match that resolution order here so we don't
+# reject a valid install.
+CLAUDE_FOUND=""
+if command -v claude >/dev/null 2>&1; then
+    CLAUDE_FOUND="$(command -v claude)"
+else
+    for d in "$HOME/.local/bin" "/opt/homebrew/bin" "/usr/local/bin"; do
+        if [ -x "$d/claude" ]; then
+            CLAUDE_FOUND="$d/claude"
+            break
+        fi
+    done
+fi
+if [ -z "$CLAUDE_FOUND" ]; then
     MISSING="$MISSING claude"
 fi
 
@@ -77,7 +93,7 @@ if [ -n "$MISSING" ]; then
 fi
 
 echo "Python: $PYTHON ($($PYTHON --version 2>&1))"
-echo "Claude: $(claude --version 2>/dev/null || echo 'found')"
+echo "Claude: $("$CLAUDE_FOUND" --version 2>/dev/null || echo 'found at '"$CLAUDE_FOUND")"
 echo ""
 
 # 3. Clone or update

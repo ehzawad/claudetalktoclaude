@@ -63,19 +63,26 @@ class SessionDigest:
 
 # Secret patterns to redact from tool outputs, commands, and file content.
 # Order matters — earlier alternations take precedence at each match position.
-# The `Authorization:` header case is split out explicitly so it consumes the
-# entire header value (to end of line), otherwise the generic AUTH[=:]... clause
-# would eat "Authorization: Bearer" and leave the actual token naked after it.
+# Header-style alternations (Authorization, Cookie, Proxy-Authorization,
+# X-*-Key) consume the whole header VALUE to end of line so no token after
+# them is left naked.
 _SECRET_PATTERNS = re.compile(
     r"(?:"
     r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----|"
     r"Authorization:\s*[^\r\n]+|"
+    r"Proxy-Authorization:\s*[^\r\n]+|"
+    r"Cookie:\s*[^\r\n]+|"
+    r"Set-Cookie:\s*[^\r\n]+|"
+    r"X-[A-Za-z-]+-(?:Key|Token|Auth|Secret):\s*[^\r\n]+|"
     r"(?:export\s+)?(?:API_KEY|SECRET|TOKEN|PASSWORD|CREDENTIALS|AUTH|PRIVATE_KEY|ACCESS_KEY)"
     r"[_A-Z]*[\s]*[=:]\s*\S+|"
     r"Bearer\s+\S+|"
     r"(?:sk-|pk-|ghp_|gho_|github_pat_|xoxb-|xoxp-|sk_live_|sk_test_|rk_live_|rk_test_|AKIA)\S+|"
     r"(?:mongodb\+srv|postgres(?:ql)?|mysql|redis|amqp)://\S+|"
-    r"(?:eyJ[A-Za-z0-9_-]{20,}\.){1,2}[A-Za-z0-9_-]+"  # JWTs
+    r"(?:eyJ[A-Za-z0-9_-]{20,}\.){1,2}[A-Za-z0-9_-]+|"  # JWTs
+    # URL query-string credentials: ?token=..., &api_key=..., ?access_token=...
+    r"[?&](?:token|api[_-]?key|apikey|access[_-]?token|auth[_-]?token|"
+    r"secret[_-]?key|client[_-]?secret|sig|signature)=[^&\s#]+"
     r")",
     re.IGNORECASE,
 )
@@ -185,13 +192,13 @@ def _extract_tool(block: dict) -> tuple[str | None, ToolDetail | None]:
             tool="Read", summary=f"Read: {path}", path=path)
 
     elif name in ("Glob", "Grep"):
-        pattern = inp.get("pattern", "")
+        pattern = _redact_secrets(inp.get("pattern", ""))
         return f"{name}: {pattern}", ToolDetail(
             tool=name, summary=f"{name}: {pattern}", query=pattern)
 
     elif name == "Agent":
-        desc = inp.get("description", "")
-        prompt = inp.get("prompt", "")
+        desc = _redact_secrets(inp.get("description", ""))
+        prompt = _redact_secrets(inp.get("prompt", ""))
         return f"Agent: {desc}", ToolDetail(
             tool="Agent", summary=f"Agent: {desc}",
             description=desc, content=prompt[:500])
@@ -202,12 +209,12 @@ def _extract_tool(block: dict) -> tuple[str | None, ToolDetail | None]:
             tool="Skill", summary=f"Skill: {skill}", query=skill)
 
     elif name == "WebSearch":
-        query = inp.get("query", "")
+        query = _redact_secrets(inp.get("query", ""))
         return f"WebSearch: {query}", ToolDetail(
             tool="WebSearch", summary=f"WebSearch: {query}", query=query)
 
     elif name == "WebFetch":
-        url = inp.get("url", "")
+        url = _redact_secrets(inp.get("url", ""))
         return f"WebFetch: {url}", ToolDetail(
             tool="WebFetch", summary=f"WebFetch: {url}", query=url)
 
@@ -223,25 +230,31 @@ def _extract_tool(block: dict) -> tuple[str | None, ToolDetail | None]:
         parts = name.split("__", 2)
         server = parts[1] if len(parts) > 1 else ""
         tool = parts[2] if len(parts) > 2 else name
-        detail = ""
+        detail_text = ""
         for key in ("query", "libraryId", "libraryName", "url", "prompt"):
             if inp.get(key):
-                detail = f" ({inp[key][:80]})"
+                detail_text = f" ({_redact_secrets(str(inp[key]))[:80]})"
                 break
-        summary = f"MCP({server}): {tool}{detail}"
+        summary = f"MCP({server}): {tool}{detail_text}"
+        query_val = _redact_secrets(
+            str(inp.get("query", inp.get("libraryId", "")))
+        )
         return summary, ToolDetail(
-            tool=f"MCP({server}): {tool}", summary=summary,
-            query=str(inp.get("query", inp.get("libraryId", ""))))
+            tool=f"MCP({server}): {tool}", summary=summary, query=query_val)
 
     else:
-        detail = ""
+        detail_text = ""
         for key in ("query", "question", "prompt", "file_path", "command", "url"):
             if inp.get(key):
-                detail = f": {str(inp[key])[:80]}"
+                detail_text = f": {_redact_secrets(str(inp[key]))[:80]}"
                 break
-        summary = f"{name}{detail}"
-        return summary, ToolDetail(tool=name, summary=summary,
-                                   content=str(inp)[:500])
+        summary = f"{name}{detail_text}"
+        # The full input dict can carry arbitrary secrets from arbitrary MCP
+        # / custom tools — always redact the string dump.
+        return summary, ToolDetail(
+            tool=name, summary=summary,
+            content=_redact_secrets(str(inp))[:500],
+        )
 
 
 def _extract_tool_result_text(content) -> str | None:

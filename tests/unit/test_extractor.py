@@ -80,6 +80,53 @@ class TestSecretRedaction:
         harmless = "The CLI uses --model opus and --effort max."
         assert extractor._redact_secrets(harmless) == harmless
 
+    def test_url_query_string_token(self):
+        out = extractor._redact_secrets(
+            "GET https://api.example.com/v1?token=xyzABC123&foo=bar"
+        )
+        assert "xyzABC123" not in out
+        # The `&foo=bar` tail should survive (not a secret param)
+        assert "foo=bar" in out
+
+    def test_url_query_string_api_key(self):
+        out = extractor._redact_secrets(
+            "https://example.com/a?api_key=sekret&other=keep"
+        )
+        assert "sekret" not in out
+        assert "keep" in out
+
+    def test_url_query_string_access_token(self):
+        out = extractor._redact_secrets(
+            "https://example.com?access_token=abc.def.ghi"
+        )
+        assert "abc.def.ghi" not in out
+
+    def test_cookie_header(self):
+        out = extractor._redact_secrets(
+            "Cookie: session=xyz123; _ga=GA1.2.foo"
+        )
+        # The whole header value is gone — we don't try to parse which
+        # cookies are "safe", just redact conservatively.
+        assert "session=xyz123" not in out
+
+    def test_proxy_authorization_header(self):
+        out = extractor._redact_secrets(
+            "Proxy-Authorization: Basic dXNlcjpwYXNz"
+        )
+        assert "dXNlcjpwYXNz" not in out
+
+    def test_x_api_key_header(self):
+        out = extractor._redact_secrets(
+            "X-API-Key: abc-very-secret-xyz"
+        )
+        assert "abc-very-secret-xyz" not in out
+
+    def test_x_auth_token_header(self):
+        out = extractor._redact_secrets(
+            "X-Auth-Token: session_token_here"
+        )
+        assert "session_token_here" not in out
+
 
 # ---------- Write tool — sensitive-path full redaction ----------
 
@@ -271,6 +318,78 @@ class TestExtractSession:
             for d in turn.tool_details:
                 if d.command:
                     assert "sk-LEAKED" not in d.command
+
+    def test_webfetch_url_is_redacted(self, tmp_path):
+        """Previously WebFetch passed the URL through raw — query-string
+        secrets leaked into session .md and claude-p prompts."""
+        sid = str(uuid.uuid4())
+        proj = tmp_path / "-tmp-wf"
+        proj.mkdir()
+        jsonl = self._make_jsonl(proj, sid, [
+            {
+                "type": "assistant",
+                "uuid": "a1",
+                "sessionId": sid,
+                "timestamp": "2026-04-17T00:00:00Z",
+                "message": {"content": [{
+                    "type": "tool_use", "name": "WebFetch",
+                    "input": {"url": "https://api.foo.com/v1?api_key=SECRET"},
+                }]},
+            },
+        ])
+        digest = extractor.extract_session(str(jsonl))
+        for a in digest.tool_actions:
+            assert "SECRET" not in a
+        for turn in digest.timeline:
+            for d in turn.tool_details:
+                if d.query:
+                    assert "SECRET" not in d.query
+
+    def test_mcp_input_is_redacted(self, tmp_path):
+        sid = str(uuid.uuid4())
+        proj = tmp_path / "-tmp-mcp"
+        proj.mkdir()
+        jsonl = self._make_jsonl(proj, sid, [
+            {
+                "type": "assistant",
+                "uuid": "a1",
+                "sessionId": sid,
+                "timestamp": "2026-04-17T00:00:00Z",
+                "message": {"content": [{
+                    "type": "tool_use", "name": "mcp__custom__call_api",
+                    "input": {"query": "AKIAIOSFODNN7FAKE",
+                              "url": "https://x.com?token=leak"},
+                }]},
+            },
+        ])
+        digest = extractor.extract_session(str(jsonl))
+        blob = " ".join(digest.tool_actions)
+        assert "AKIAIOSFODNN7FAKE" not in blob
+        assert "token=leak" not in blob
+
+    def test_generic_tool_input_is_redacted(self, tmp_path):
+        """Unknown tool types dump their input dict into ToolDetail.content;
+        that dump must be redacted."""
+        sid = str(uuid.uuid4())
+        proj = tmp_path / "-tmp-gen"
+        proj.mkdir()
+        jsonl = self._make_jsonl(proj, sid, [
+            {
+                "type": "assistant",
+                "uuid": "a1",
+                "sessionId": sid,
+                "timestamp": "2026-04-17T00:00:00Z",
+                "message": {"content": [{
+                    "type": "tool_use", "name": "SomeUnknownTool",
+                    "input": {"some_field": "sk-SuperSecretKey"},
+                }]},
+            },
+        ])
+        digest = extractor.extract_session(str(jsonl))
+        for turn in digest.timeline:
+            for d in turn.tool_details:
+                assert "sk-SuperSecretKey" not in d.content
+                assert "sk-SuperSecretKey" not in d.summary
 
     def test_system_injected_user_prompt_filtered(self, tmp_path):
         sid = str(uuid.uuid4())

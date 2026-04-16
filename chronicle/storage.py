@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import (
-    chronicle_dir, failed_dir, processed_dir,
+    failed_dir, processed_dir,
     ensure_dirs, project_chronicle_dir,
 )
 from .summarizer import entry_to_session_markdown
