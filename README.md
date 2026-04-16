@@ -1,12 +1,31 @@
 # Decision Chronicle
 
-Captures planning decisions, architecture choices, debugging context, and implementation rationale from coding sessions — writes them to searchable markdown files automatically.
+Captures planning decisions, architecture choices, debugging context, and implementation rationale from coding sessions — writes them to searchable markdown files.
 
 It records both minds: the programmer's intuitions, pushback, and "wait, what about X?" moments, and the assistant's analysis, trade-off evaluations, and course corrections. Six months later, anyone reading the chronicle doesn't just see what was built — they see how it was thought through.
 
 ## The problem
 
 You spend time planning: architecture decisions, stack choices, testing strategies. Then you delegate implementation, guiding it step by step. Everything lands in git. But the *reasoning* — trade-offs discussed, approaches rejected, the "why" behind the "what" — lives only in ephemeral chat sessions. After they end, that knowledge is gone.
+
+## Two processing modes
+
+Chronicle runs in one of two modes. **Foreground is the default** — it does not burn tokens passively.
+
+| | Foreground (default) | Background |
+|---|---|---|
+| Hooks record session events | yes | yes |
+| Past session titles injected into new sessions | yes | yes |
+| Auto-summarization | **no** | after 5 min of quiet |
+| Passive token burn | zero | per-session |
+| Runs | launchd/systemd service | none |
+| Switch | `chronicle install-daemon` | `chronicle uninstall-daemon` |
+
+In **foreground mode**, summarization happens only when you explicitly run `chronicle process`, `chronicle insight`, `chronicle story`, or `chronicle rewind --summary`. This protects token budgets.
+
+In **background mode**, a daemon (launchd on macOS, systemd --user on Linux) auto-summarizes closed sessions after 5 minutes of idle. Enable it with `chronicle install-daemon` when you want hands-off operation.
+
+Diagnose your setup with `chronicle doctor`.
 
 ## Concepts
 
@@ -44,14 +63,20 @@ If you omit the project name, `insight` and `story` use your current working dir
 
 ## How it works
 
-Nothing changes about your workflow. Work as usual, close the session.
+In **both modes**, hooks fire on every prompt, response, and session end — logging events to `events.jsonl` and injecting past session titles as context into new sessions.
 
-1. **Hooks fire** on every prompt, response, and session end — logging events to `events.jsonl`
-2. **A background daemon** runs continuously (see [Global debounce](#global-debounce) and [Parallel workers](#parallel-workers) below for how)
-3. **Processing** means: extract the session JSONL, redact secrets, send to `claude -p` with `--json-schema` for validated structured output (`--effort max`, `--fallback-model sonnet`, uses your subscription)
-4. **Output**: one `chronicle.md` per project (cumulative, chronological, with timeline table) plus individual session `.md` files
-5. **Next session** gets past decision titles injected as context automatically via the SessionStart hook
-6. **On-demand**: `chronicle insight` generates an HTML dashboard, `chronicle story` generates a unified narrative — both call `claude -p` with the aggregated session data
+**Foreground mode** stops there. You run `chronicle process` (or `insight` / `story` / `rewind --summary`) when you want summaries. Each command:
+1. Scans `~/.claude/projects/<slug>/*.jsonl` for sessions without a success marker.
+2. Extracts each JSONL, redacts secrets, sends to `claude -p --json-schema --effort max --fallback-model sonnet --no-session-persistence` (stripping `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` to route through your subscription).
+3. Writes the resulting per-session `.md` plus a cumulative `chronicle.md` per project.
+4. Infra errors (missing binary, auth failure) are classified separately from transient errors so a config problem doesn't burn the retry budget.
+
+**Background mode** adds a daemon that does the same processing automatically after the [Global debounce](#global-debounce) and through [Parallel workers](#parallel-workers). `chronicle install-daemon` installs + starts the service. `chronicle process` still works manually; it pauses the daemon service (via `launchctl bootout` / `systemctl --user stop`) and holds `~/.chronicle/processing.lock` while running so the two never race.
+
+All state:
+- `~/.chronicle/.processed/<hash>` — success marker (per-session `.md` written)
+- `~/.chronicle/.failed/<hash>.json` — failure record with `{attempts, terminal, last_error_kind, last_error_message}`. `terminal=true` after `max_retries`, requires `chronicle process --retry-failed` to retry.
+- `~/.chronicle/processing.lock` — mutex between daemon and batch
 
 ### Global debounce
 
@@ -590,12 +615,26 @@ All tool outputs pass through a pattern scanner before storage:
 ## Install
 
 ```bash
+# Foreground mode (default — zero passive token burn)
 curl -fsSL https://raw.githubusercontent.com/ehzawad/claudetalktoclaude/main/install.sh | bash
+
+# Background mode (daemon auto-summarizes)
+CHRONICLE_MODE=background curl -fsSL https://raw.githubusercontent.com/ehzawad/claudetalktoclaude/main/install.sh | bash
 ```
 
 The script checks your platform, finds Python 3.10+, clones to `~/.chronicle/src`, creates a venv, configures hooks in `~/.claude/settings.json`, and sets secure permissions. Restart Claude Code to activate.
 
-To update, just re-run the same command. It handles dirty install directories automatically.
+You can switch modes at any time with `chronicle install-daemon` / `chronicle uninstall-daemon`. Check current state with `chronicle doctor`.
+
+To update, re-run the install command. It handles dirty install directories automatically.
+
+### Ubuntu 24.04 LTS note
+
+If you use background mode on Ubuntu, enable user-service persistence so the systemd daemon keeps running after logout:
+
+```bash
+sudo loginctl enable-linger "$USER"
+```
 
 <details><summary>Manual install</summary>
 
@@ -662,19 +701,24 @@ chronicle story                       # story.md for current directory
 chronicle story whisper               # substring match on slug
 
 # Process
-chronicle process --workers 5           # all projects
-chronicle process --project sql         # substring match on slug
-chronicle process --force --workers 5   # reprocess everything
-chronicle process --dry-run             # preview only
+chronicle process --workers 5                  # summarize pending sessions
+chronicle process --project sql                # substring match on slug
+chronicle process --force --workers 5          # reprocess successful sessions
+chronicle process --retry-failed --workers 5   # retry terminal-failure sessions
+chronicle process --dry-run                    # preview only
 
-# Daemon
+# Mode management
+chronicle doctor                      # diagnose: mode, claude path, drift, counts
+chronicle install-daemon              # switch to background mode (starts daemon)
+chronicle uninstall-daemon            # switch to foreground mode (stops daemon)
+
+# Daemon internals (background mode only)
 chronicle daemon --status
 chronicle daemon --stop
-chronicle install-daemon              # auto-start on login
 
 # Maintenance
 chronicle --version
-chronicle reload                      # reinstall + restart daemon
+chronicle reload                      # reinstall + restart daemon (if running)
 ```
 
 All project names are substring matches against slugs (see [How project names work](#how-project-names-work-in-commands)). Run from anywhere.
@@ -710,13 +754,14 @@ Each project gets up to three views:
 
 | Key | Default | Description |
 |-----|---------|-------------|
+| `processing_mode` | `"foreground"` | `"foreground"` (no daemon) or `"background"` (daemon auto-processes). Set via `chronicle install-daemon` / `uninstall-daemon`. |
 | `model` | `"opus"` | Model for summarization |
 | `fallback_model` | `"sonnet"` | Auto-fallback when primary model is overloaded |
 | `concurrency` | `5` | Parallel workers |
-| `poll_interval_seconds` | `5` | Daemon poll interval |
-| `quiet_minutes` | `5` | Global debounce — minutes of silence before processing |
+| `poll_interval_seconds` | `5` | Daemon poll interval (background mode) |
+| `quiet_minutes` | `5` | Global debounce — minutes of silence before daemon processes |
 | `scan_interval_minutes` | `30` | How often daemon scans for un-evented sessions |
-| `max_retries` | `3` | Give up after N failed summarization attempts |
+| `max_retries` | `3` | Give up after N transient-failure attempts (marks `.failed` terminal) |
 | `skip_projects` | `[]` | Project slugs to exclude |
 
 ## Where things live
@@ -726,10 +771,12 @@ Each project gets up to three views:
 ~/.chronicle/
   ├── events.jsonl                    <- hook event queue
   ├── events.offset                   <- daemon read position (bytes)
-  ├── config.json                     <- configuration
-  ├── daemon.pid                      <- singleton lock (fcntl flock)
+  ├── config.json                     <- configuration (including processing_mode)
+  ├── daemon.pid                      <- singleton lock (fcntl flock, bg mode)
   ├── daemon.log                      <- daemon stdout/stderr
-  ├── .processed/                     <- dedup markers (hash → session_id + cost)
+  ├── processing.lock                 <- mutex between daemon and `chronicle process`
+  ├── .processed/<hash>               <- success markers (session .md exists)
+  ├── .failed/<hash>.json             <- failure records: {attempts, terminal, error_kind}
   └── projects/<slug>/
       ├── chronicle.md                <- cumulative project log
       ├── insight.html                <- HTML dashboard (chronicle insight)
@@ -740,11 +787,19 @@ Each project gets up to three views:
 
 The `<slug>` is your project path with `/` replaced by `-`.
 
+## Troubleshooting
+
+Run `chronicle doctor` for a diagnostic report:
+
+- **`claude` not found** — the daemon can't summarize. Install Claude Code CLI or ensure it's on the daemon's PATH. In background mode, `chronicle install-daemon` bakes PATH into the launchd plist / systemd unit so launchd's minimal env (`/usr/bin:/bin:/usr/sbin:/sbin`) doesn't cause `FileNotFoundError`.
+- **Mode drift warnings** — config says one mode but the service file / daemon says another. Fix with `chronicle install-daemon` or `chronicle uninstall-daemon` as indicated.
+- **Sessions in terminal-failure state** — `.failed/<hash>.json` with `terminal=true`. After fixing the underlying issue, run `chronicle process --retry-failed --workers 5`.
+
 ## Security
 
 **Secret redaction** — tool outputs are scanned for known patterns before storage. API keys, auth headers, private keys, JWTs, connection strings, and env var assignments are replaced with `[REDACTED]`. Sensitive file types (`.env`, `.pem`, `.key`) get fully redacted content. User prompts are not redacted.
 
-**Subscription routing** — `claude -p` subprocess calls strip `ANTHROPIC_API_KEY` from the environment so summarization always routes through your paid subscription instead of API credits ([anthropics/claude-code#2051](https://github.com/anthropics/claude-code/issues/2051)).
+**Subscription routing** — `claude -p` subprocess calls strip `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_BASE_URL` from the environment so summarization always routes through your paid subscription instead of API credits or a proxy gateway ([anthropics/claude-code#2051](https://github.com/anthropics/claude-code/issues/2051)).
 
 **File permissions** — `~/.chronicle/` is `0700` (owner-only), matching `~/.claude/`.
 

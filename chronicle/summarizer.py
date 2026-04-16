@@ -1,8 +1,7 @@
 """Call Claude (via `claude -p`) to summarize session content into decisions.
 
 Uses `claude -p --model <model>` for summarization via your paid subscription.
-Strips ANTHROPIC_API_KEY from the subprocess environment so `claude -p` always
-routes through the user's subscription (Pro/Max) instead of API credits.
+Subprocess env + PATH + auth-var stripping all live in `claude_cli`.
 
 Uses --json-schema for validated structured output and --effort max for
 thorough reasoning. Falls back to --fallback-model when primary is overloaded.
@@ -12,10 +11,10 @@ Provides `async_summarize_session()` for parallel processing of multiple session
 
 import asyncio
 import json
-import os
 import sys
 from dataclasses import dataclass, field
 
+from .claude_cli import ErrorKind, spawn_claude
 from .config import load_config
 from .extractor import SessionDigest, digest_to_text, timeline_to_log
 
@@ -190,7 +189,9 @@ class ChronicleEntry:
     files_changed: list = field(default_factory=list)
     cross_references: list = field(default_factory=list)
     is_empty: bool = False
-    is_error: bool = False  # transient failure — should retry later
+    is_error: bool = False  # summarization failed
+    error_kind: str = ""  # "infra" | "transient" | "parse" | "" (no error)
+    error_message: str = ""
     total_turns: int = 0
     tool_actions: list = field(default_factory=list)
     turn_log: str = ""  # one-liner-per-turn chronological log
@@ -213,49 +214,8 @@ def _make_entry(digest: SessionDigest) -> ChronicleEntry:
     )
 
 
-def _parse_claude_response(stdout: str, entry: ChronicleEntry) -> ChronicleEntry:
-    """Parse claude -p JSON output into a ChronicleEntry.
-
-    With --json-schema, validated data lives in outer["structured_output"].
-    Falls back to parsing outer["result"] as JSON if structured_output is
-    absent (older CLI or schema validation failure on Claude's side).
-    """
-    try:
-        outer = json.loads(stdout)
-    except json.JSONDecodeError:
-        print("[chronicle] failed to parse outer JSON wrapper", file=sys.stderr)
-        entry.is_error = True
-        return entry
-
-    entry.total_cost_usd = outer.get("total_cost_usd", 0.0) or 0.0
-
-    if outer.get("is_error"):
-        print(f"[chronicle] claude -p returned error: "
-              f"{outer.get('result', '')[:200]}", file=sys.stderr)
-        entry.is_error = True
-        return entry
-
-    # Primary path: structured_output from --json-schema
-    data = outer.get("structured_output")
-
-    # Fallback: parse result text as JSON (no multi-strategy extraction)
-    if not data:
-        raw_text = outer.get("result", "").strip()
-        if not raw_text:
-            entry.is_empty = True
-            return entry
-        try:
-            data = json.loads(raw_text)
-        except (json.JSONDecodeError, TypeError):
-            print("[chronicle] no structured_output and result is not JSON, "
-                  "will retry", file=sys.stderr)
-            entry.is_error = True
-            return entry
-
-    if not isinstance(data, dict):
-        entry.is_error = True
-        return entry
-
+def _populate_entry_from_structured(data: dict, entry: ChronicleEntry) -> ChronicleEntry:
+    """Fill a ChronicleEntry from a validated structured_output dict."""
     if data.get("is_empty"):
         entry.is_empty = True
         entry.title = data.get("title", f"Session {entry.session_id[:8]}")
@@ -277,12 +237,35 @@ def _parse_claude_response(stdout: str, entry: ChronicleEntry) -> ChronicleEntry
     return entry
 
 
+def _extract_structured(outer: dict) -> dict | None:
+    """Return the structured_output dict from the outer JSON wrapper, or None.
+
+    Falls back to parsing outer["result"] as JSON for CLI versions without
+    --json-schema support.
+    """
+    data = outer.get("structured_output")
+    if isinstance(data, dict):
+        return data
+    raw_text = (outer.get("result") or "").strip()
+    if not raw_text:
+        return None
+    try:
+        loaded = json.loads(raw_text)
+        return loaded if isinstance(loaded, dict) else None
+    except (ValueError, TypeError):
+        return None
+
+
 async def async_summarize_session(digest: SessionDigest) -> ChronicleEntry:
     """One-shot summarization via claude -p with --json-schema validation.
 
     Uses --no-session-persistence so observer calls never appear in the user's
     session list. Uses --effort max for thorough reasoning and --fallback-model
     for resilience when the primary model is overloaded.
+
+    Classifies failures via claude_cli.ErrorKind so the caller (storage.write_chronicle)
+    can distinguish infrastructure errors (don't charge retries) from transient /
+    parse errors (do charge retries).
     """
     config = load_config()
     model = config.get("model", "opus")
@@ -308,56 +291,38 @@ async def async_summarize_session(digest: SessionDigest) -> ChronicleEntry:
     else:
         prompt = base_prompt
 
-    # Strip ANTHROPIC_API_KEY so claude -p uses the user's paid subscription
-    # (Max/Pro) instead of API key credits. See anthropics/claude-code#2051.
-    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    result = await spawn_claude(
+        prompt=prompt,
+        model=model,
+        fallback_model=fallback,
+        effort="max",
+        json_schema=CHRONICLE_JSON_SCHEMA,
+        timeout=300,
+    )
 
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "claude", "-p",
-            "--model", model,
-            "--output-format", "json",
-            "--no-session-persistence",
-            "--effort", "max",
-            "--fallback-model", fallback,
-            "--json-schema", json.dumps(CHRONICLE_JSON_SCHEMA),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(prompt.encode()), timeout=300
-        )
+    entry.total_cost_usd = result.total_cost_usd
 
-        if proc.returncode != 0:
-            # Error details are often in stdout (JSON with is_error:true), not stderr
-            err_msg = stderr.decode()[:200]
-            if not err_msg:
-                try:
-                    err_data = json.loads(stdout.decode())
-                    err_msg = err_data.get("result", "unknown error")[:200]
-                except Exception:
-                    err_msg = stdout.decode()[:200] or "unknown error"
-            print(f"[chronicle] claude -p failed: {err_msg}", file=sys.stderr)
-            entry.is_error = True
+    if result.error_kind is not None:
+        entry.is_error = True
+        entry.error_kind = result.error_kind.value
+        entry.error_message = result.error_message
+        print(f"[chronicle] summarization {result.error_kind.value}: "
+              f"{result.error_message[:200]}", file=sys.stderr)
+        return entry
+
+    outer = result.stdout_json or {}
+    data = _extract_structured(outer)
+    if data is None:
+        # No structured output AND empty result text — treat as genuinely empty
+        if not (outer.get("result") or "").strip():
+            entry.is_empty = True
             return entry
-
-        entry = _parse_claude_response(stdout.decode(), entry)
-
-    except asyncio.TimeoutError:
-        print("[chronicle] claude -p timed out, killing subprocess", file=sys.stderr)
-        try:
-            proc.kill()
-            await proc.communicate()
-        except Exception:
-            pass
         entry.is_error = True
-    except Exception as e:
-        print(f"[chronicle] summarization error: {e}", file=sys.stderr)
-        entry.is_error = True
+        entry.error_kind = ErrorKind.PARSE.value
+        entry.error_message = "structured_output missing and result not JSON"
+        return entry
 
-    return entry
+    return _populate_entry_from_structured(data, entry)
 
 
 def entry_to_session_markdown(entry: ChronicleEntry) -> str:

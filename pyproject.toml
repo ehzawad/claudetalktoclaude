@@ -1,9 +1,17 @@
 [project]
 name = "chronicle"
-version = "0.6.0"
+version = "0.7.0"
 description = "Hook-triggered persistent session knowledge tracker for Claude Code"
 requires-python = ">=3.10"
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
 
 [project.scripts]
 chronicle = "chronicle.__main__:main"
 chronicle-hook = "chronicle.hook:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning"]

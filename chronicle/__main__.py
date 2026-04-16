@@ -1,7 +1,11 @@
 """Decision Chronicle — persistent session knowledge tracker for Claude Code.
 
+Two processing modes:
+  foreground  (default) — no daemon, summarize on demand via `chronicle process`.
+  background            — daemon auto-summarizes. Enable with `chronicle install-daemon`.
+
 Usage:
-    chronicle process [--project NAME] [--workers N] [--force] [--dry-run]
+    chronicle process [--project NAME] [--workers N] [--force] [--retry-failed] [--dry-run]
         Process sessions into chronicle records. Runs claude -p to summarize.
 
     chronicle query projects
@@ -23,12 +27,17 @@ Usage:
     chronicle story [project-name]
         Generate a unified project narrative (story.md) for stakeholders.
 
+    chronicle doctor
+        Diagnose: mode, resolved claude binary, daemon/service status, counts.
+
     chronicle daemon [--bg|--stop|--status]
-        Manage the background daemon that auto-processes sessions.
+        Manage the background daemon process (in background mode).
     chronicle install-daemon
-        Install systemd/launchd service for auto-start on login.
+        Switch to background mode: install & start launchd/systemd service.
+    chronicle uninstall-daemon
+        Switch to foreground mode: stop & remove launchd/systemd service.
     chronicle reload
-        Reinstall from source, fix symlinks, restart daemon.
+        Reinstall from source, fix symlinks, restart daemon if running.
 
     chronicle --version
 """
@@ -70,6 +79,11 @@ def main():
         story_main()
     elif command == "install-daemon":
         install_daemon()
+    elif command == "uninstall-daemon":
+        uninstall_daemon()
+    elif command == "doctor":
+        from .doctor import run as doctor_run
+        sys.exit(doctor_run())
     elif command == "reload":
         reload_install()
     else:
@@ -79,59 +93,54 @@ def main():
 
 
 def install_daemon():
-    import shutil
-    from pathlib import Path
+    """Switch to background mode: write service file + bootstrap + set config."""
+    from . import service
+    from .mode import set_processing_mode
 
-    if sys.platform == "linux":
-        src = Path(__file__).parent / "chronicle-daemon.service"
-        dst = Path.home() / ".config" / "systemd" / "user" / "chronicle-daemon.service"
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
-        print(f"Installed: {dst}")
-        print()
-        print("To start:")
-        print("  systemctl --user daemon-reload")
-        print("  systemctl --user enable --now chronicle-daemon.service")
-        print()
-        print("To check:")
+    try:
+        service.install_service()
+    except RuntimeError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+    set_processing_mode("background")
+
+    print("Installed background daemon and set processing_mode=background.")
+    print()
+    if sys.platform == "darwin":
+        print("macOS launchd service:")
+        print(f"  {service._MAC_PLIST_PATH}")
+        print("Manage:")
+        print("  launchctl print gui/$UID/com.chronicle.daemon")
+        print("  launchctl bootout gui/$UID/com.chronicle.daemon")
+    elif sys.platform.startswith("linux"):
+        print("Linux systemd --user service:")
+        print(f"  {service._LINUX_UNIT_PATH}")
+        print("Manage:")
         print("  systemctl --user status chronicle-daemon.service")
         print("  journalctl --user -u chronicle-daemon.service -f")
-    elif sys.platform == "darwin":
-        chronicle_bin = shutil.which("chronicle") or str(Path.home() / ".local" / "bin" / "chronicle")
-        plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.chronicle.daemon</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{chronicle_bin}</string>
-        <string>daemon</string>
-    </array>
-    <key>WorkingDirectory</key>
-    <string>{Path.home()}</string>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>{Path.home()}/.chronicle/daemon.log</string>
-    <key>StandardErrorPath</key>
-    <string>{Path.home()}/.chronicle/daemon.log</string>
-</dict>
-</plist>
-"""
-        dst = Path.home() / "Library" / "LaunchAgents" / "com.chronicle.daemon.plist"
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_text(plist_content)
-        print(f"Installed: {dst}")
-        print("To start: launchctl load ~/Library/LaunchAgents/com.chronicle.daemon.plist")
-        print("To stop:  launchctl unload ~/Library/LaunchAgents/com.chronicle.daemon.plist")
-    else:
-        print(f"Unsupported platform: {sys.platform}")
-        print("Run the daemon manually: chronicle daemon")
+        print()
+        print("Note: on Ubuntu 24.04, enable user-service persistence with")
+        print("  sudo loginctl enable-linger $USER")
+    print()
+    print("Verify:  chronicle doctor")
+
+
+def uninstall_daemon():
+    """Switch to foreground mode: remove service file + update config."""
+    from . import service
+    from .mode import set_processing_mode
+
+    try:
+        service.uninstall_service()
+    except RuntimeError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
+    set_processing_mode("foreground")
+    print("Uninstalled background daemon and set processing_mode=foreground.")
+    print()
+    print("Verify:  chronicle doctor")
+    print("Note: hooks still record session events and inject past titles;")
+    print("      run `chronicle process` to summarize on demand.")
 
 
 def reload_install():

@@ -1,15 +1,32 @@
 """Shared storage operations for chronicle data.
 
-Handles session record writing, chronicle appending, and processed-session
-tracking. Used by both daemon.py (real-time processing) and batch.py
-(retroactive processing).
+Marker state layout:
+  ~/.chronicle/.processed/<hash>       — SUCCESS only (session .md written)
+  ~/.chronicle/.failed/<hash>.json     — failure state with attempt counter:
+      {session_id, attempts, terminal: bool, last_error_kind,
+       last_error_message, last_attempt_iso}
+
+  Transient failures live in .failed/ with terminal=false and retriable.
+  Reaching max_retries flips terminal=true; skipped by default unless
+  `--retry-failed` is passed.
+
+  Success clears any .failed/ entry for the session.
+
+Hash is sha256(session_id)[:16]. End_time is not part of the hash because
+JSONL files grow after Stop (SessionEnd appends), and we want stable IDs.
 """
 
 import hashlib
+import json
 import os
 import re
+from datetime import datetime, timezone
+from pathlib import Path
 
-from .config import CHRONICLE_DIR, ensure_dirs, project_chronicle_dir
+from .config import (
+    CHRONICLE_DIR, FAILED_DIR, PROCESSED_DIR,
+    ensure_dirs, project_chronicle_dir,
+)
 from .summarizer import entry_to_session_markdown
 
 
@@ -20,49 +37,100 @@ def _atomic_write(path, content: str):
     os.replace(str(tmp), str(path))
 
 
-def chronicled_hash(session_id: str, end_time: str = "") -> str:
-    # Hash on session_id only — JSONL files grow after processing (e.g.
-    # SessionEnd appended after Stop), shifting end_time and invalidating
-    # the old session_id:end_time hash.  Use --force to reprocess.
+def session_hash(session_id: str) -> str:
+    """Stable 16-char sha256 prefix for a session ID. Used for marker filenames."""
     return hashlib.sha256(session_id.encode()).hexdigest()[:16]
 
 
-def already_chronicled(session_id: str, end_time: str) -> bool:
-    """Check if this session has already been chronicled."""
-    marker_dir = CHRONICLE_DIR / ".processed"
-    marker_dir.mkdir(exist_ok=True)
-    h = chronicled_hash(session_id, end_time)
-    return (marker_dir / h).exists()
+# --- Success markers (.processed/) ---
+
+def _ensure_dir(d: Path):
+    d.mkdir(parents=True, exist_ok=True)
 
 
-def mark_chronicled(session_id: str, end_time: str, cost_usd: float = 0.0):
-    marker_dir = CHRONICLE_DIR / ".processed"
-    marker_dir.mkdir(exist_ok=True)
-    h = chronicled_hash(session_id, end_time)
-    (marker_dir / h).write_text(f"{session_id}\n{end_time}\n{cost_usd:.4f}\n")
+def is_succeeded(session_id: str) -> bool:
+    """Check whether this session has a success marker."""
+    _ensure_dir(PROCESSED_DIR)
+    return (PROCESSED_DIR / session_hash(session_id)).exists()
 
 
-def get_attempt_count(session_id: str, end_time: str) -> int:
-    """Get the number of failed processing attempts for a session."""
-    marker_dir = CHRONICLE_DIR / ".processed"
-    h = chronicled_hash(session_id, end_time)
-    attempt_file = marker_dir / f"{h}.attempts"
-    if attempt_file.exists():
+def mark_succeeded(session_id: str, end_time: str, cost_usd: float = 0.0):
+    """Record a successful chronicle; clear any failure state."""
+    _ensure_dir(PROCESSED_DIR)
+    h = session_hash(session_id)
+    (PROCESSED_DIR / h).write_text(f"{session_id}\n{end_time}\n{cost_usd:.4f}\n")
+    clear_failed(session_id)
+
+
+# --- Failure markers (.failed/) — unified retry counter + terminal flag ---
+
+def _failed_path(session_id: str) -> Path:
+    return FAILED_DIR / f"{session_hash(session_id)}.json"
+
+
+def get_failed(session_id: str) -> dict | None:
+    """Return the .failed/<hash>.json record if present, else None."""
+    _ensure_dir(FAILED_DIR)
+    p = _failed_path(session_id)
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def is_terminal_failure(session_id: str) -> bool:
+    """True iff session has been given up on (max_retries hit)."""
+    rec = get_failed(session_id)
+    return bool(rec and rec.get("terminal"))
+
+
+def get_attempt_count(session_id: str) -> int:
+    rec = get_failed(session_id)
+    return int(rec.get("attempts", 0)) if rec else 0
+
+
+def record_failed_attempt(session_id: str, *, error_kind: str,
+                          error_message: str, terminal: bool) -> int:
+    """Append a failed attempt. Returns new attempts count.
+
+    Pass terminal=True when max_retries has been reached.
+    """
+    _ensure_dir(FAILED_DIR)
+    rec = get_failed(session_id) or {"session_id": session_id, "attempts": 0}
+    rec["attempts"] = int(rec.get("attempts", 0)) + 1
+    rec["terminal"] = bool(terminal)
+    rec["last_error_kind"] = error_kind
+    rec["last_error_message"] = (error_message or "")[:500]
+    rec["last_attempt_iso"] = datetime.now(timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    _atomic_write(_failed_path(session_id), json.dumps(rec, indent=2))
+    return rec["attempts"]
+
+
+def clear_failed(session_id: str):
+    p = _failed_path(session_id)
+    if p.exists():
+        p.unlink()
+
+
+def list_failed(*, terminal_only: bool = False) -> list[dict]:
+    """Return failure records (terminal + in-progress). Used by query/doctor."""
+    _ensure_dir(FAILED_DIR)
+    out = []
+    for p in sorted(FAILED_DIR.glob("*.json")):
         try:
-            return int(attempt_file.read_text().strip())
-        except (ValueError, OSError):
-            return 0
-    return 0
+            rec = json.loads(p.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if terminal_only and not rec.get("terminal"):
+            continue
+        out.append(rec)
+    return out
 
 
-def record_attempt(session_id: str, end_time: str):
-    """Increment the failed attempt counter for a session."""
-    marker_dir = CHRONICLE_DIR / ".processed"
-    marker_dir.mkdir(exist_ok=True)
-    h = chronicled_hash(session_id, end_time)
-    attempt_file = marker_dir / f"{h}.attempts"
-    count = get_attempt_count(session_id, end_time) + 1
-    attempt_file.write_text(str(count))
 
 
 def slugify(text: str, max_len: int = 40) -> str:
@@ -87,40 +155,40 @@ def session_filename(entry) -> str:
     return f"{date_part}_{short_id}{title_slug}.md"
 
 
-def unmark_chronicled(session_id: str):
-    """Remove the processed marker for a session so it can be reprocessed.
+def clear_session_markers(session_id: str):
+    """Remove all marker state (success, failed) so session can be reprocessed.
 
     Tries exact hash first. If that fails (e.g. short ID vs full UUID mismatch),
-    scans marker files by content to find the right one.
+    scans .processed/ marker files by content to find the right one.
     """
-    marker_dir = CHRONICLE_DIR / ".processed"
-    if not marker_dir.exists():
+    _ensure_dir(PROCESSED_DIR)
+    _ensure_dir(FAILED_DIR)
+
+    h = session_hash(session_id)
+    removed_any = False
+    for p in (PROCESSED_DIR / h, FAILED_DIR / f"{h}.json"):
+        if p.exists():
+            p.unlink()
+            removed_any = True
+    if removed_any:
         return
 
-    # Try exact hash
-    h = chronicled_hash(session_id)
-    marker = marker_dir / h
-    if marker.exists():
-        marker.unlink()
-        attempt = marker_dir / f"{h}.attempts"
-        if attempt.exists():
-            attempt.unlink()
-        return
-
-    # Fallback: scan marker files by content (handles short ID → full UUID)
-    for marker in marker_dir.glob("[0-9a-f]*"):
-        if marker.suffix == ".attempts":
+    # Fallback: the caller passed a short ID. Scan success markers by content.
+    for marker in PROCESSED_DIR.glob("[0-9a-f]*"):
+        if not marker.is_file():
             continue
         try:
             content = marker.read_text()
             if content.startswith(session_id):
-                marker.unlink()
-                attempt = marker.with_suffix(".attempts")
-                if attempt.exists():
-                    attempt.unlink()
+                full_id = content.split("\n")[0].strip()
+                clear_session_markers(full_id)
                 return
         except OSError:
             continue
+
+
+# Legacy-name alias retained for the one internal caller (storage.delete_session).
+unmark_chronicled = clear_session_markers
 
 
 def delete_session(session_path, slug: str):
@@ -447,25 +515,48 @@ def _retrofit_timeline(chronicle_file, existing: str):
 
 
 def write_chronicle(entry, digest, max_retries: int = 3):
-    """Write per-session detail file and append to cumulative chronicle."""
+    """Write per-session detail file and append to cumulative chronicle.
+
+    Retry accounting respects entry.error_kind:
+      - "infra"   → do NOT count against retries (config/env issue, not session-specific)
+      - "transient" or "parse" → count; on hitting max_retries, flip .failed to terminal
+      - ""        → success path (clears any prior .failed record)
+    """
     if entry.is_error:
-        record_attempt(digest.session_id, digest.end_time)
-        attempts = get_attempt_count(digest.session_id, digest.end_time)
-        if attempts >= max_retries:
-            print(f"[chronicle] giving up on {digest.session_id[:8]} after {attempts} failed attempts")
-            mark_chronicled(digest.session_id, digest.end_time)
+        if entry.error_kind == "infra":
+            # Infrastructure error — don't charge the session's retry budget.
+            # Daemon will retry on next tick; user sees the issue via
+            # `chronicle doctor` and daemon.log.
+            print(f"[chronicle] infra error for {digest.session_id[:8]} "
+                  f"(not counted): {entry.error_message[:150]}")
+            return
+
+        # Transient / parse — decide terminal flag before writing.
+        current = get_attempt_count(digest.session_id)
+        will_be = current + 1
+        terminal = will_be >= max_retries
+        attempts = record_failed_attempt(
+            digest.session_id,
+            error_kind=entry.error_kind or "transient",
+            error_message=entry.error_message or "(no detail)",
+            terminal=terminal,
+        )
+        if terminal:
+            print(f"[chronicle] giving up on {digest.session_id[:8]} "
+                  f"after {attempts} failed attempts "
+                  f"(kind={entry.error_kind or 'unknown'})")
         else:
             print(f"[chronicle] transient error for {digest.session_id[:8]} "
-                  f"(attempt {attempts}/{max_retries}), will retry later")
+                  f"(attempt {attempts}/{max_retries}): "
+                  f"{entry.error_message[:150]}")
         return
 
     if entry.is_empty:
-        # Still write a record — every session appears in rewind
         entry.title = entry.title or f"Session {digest.session_id[:8]}"
         entry.summary = entry.summary or "(No meaningful decisions recorded)"
 
     write_session_record(entry, digest.project_slug)
     append_to_chronicle(entry, digest.project_slug)
     rebuild_prompts_section(digest.project_slug)
-    mark_chronicled(digest.session_id, digest.end_time,
-                    cost_usd=getattr(entry, "total_cost_usd", 0.0))
+    mark_succeeded(digest.session_id, digest.end_time,
+                   cost_usd=getattr(entry, "total_cost_usd", 0.0))

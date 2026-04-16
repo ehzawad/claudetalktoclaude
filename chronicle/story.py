@@ -12,12 +12,11 @@ Usage:
 
 import argparse
 import asyncio
-import json
-import os
 import re
 import sys
 from pathlib import Path
 
+from .claude_cli import spawn_claude
 from .config import PROJECTS_DIR, load_config
 
 
@@ -132,44 +131,18 @@ def generate_story(project_name: str | None = None):
     print(f"  Generating story for {project_dir.name} "
           f"({len(session_pairs)} sessions)...")
 
-    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
-
     async def _generate():
-        proc = await asyncio.create_subprocess_exec(
-            "claude", "-p",
-            "--model", model,
-            "--output-format", "json",
-            "--no-session-persistence",
-            "--effort", "max",
-            "--fallback-model", fallback,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
+        res = await spawn_claude(
+            prompt=prompt, model=model, fallback_model=fallback,
+            effort="max", timeout=600,
         )
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(prompt.encode()), timeout=600
-            )
-        except asyncio.TimeoutError:
-            try:
-                proc.kill()
-                await proc.communicate()
-            except Exception:
-                pass
+        if not res.ok:
+            print(f"  Error ({res.error_kind.value}): {res.error_message[:200]}",
+                  file=sys.stderr)
             return None
-        if proc.returncode != 0:
-            err = stderr.decode()[:200] or stdout.decode()[:200]
-            print(f"  Error: {err}", file=sys.stderr)
-            return None
-        try:
-            outer = json.loads(stdout.decode())
-            cost = outer.get("total_cost_usd", 0)
-            if cost:
-                print(f"  Cost: ${cost:.2f}")
-            return outer.get("result", "")
-        except json.JSONDecodeError:
-            return stdout.decode()
+        if res.total_cost_usd:
+            print(f"  Cost: ${res.total_cost_usd:.2f}")
+        return (res.stdout_json or {}).get("result", "")
 
     result = asyncio.run(_generate())
     if not result:

@@ -64,7 +64,14 @@ def main():
             f.write(json.dumps(data, separators=(",", ":")) + "\n")
 
         if event_name == "SessionStart":
-            if not _daemon_running():
+            # Only respawn the daemon if we're in background mode. In
+            # foreground mode the user opted out of passive processing.
+            try:
+                from .mode import is_background_mode
+                bg = is_background_mode()
+            except Exception:
+                bg = False
+            if bg and not _daemon_running():
                 _spawn_daemon()
 
             # Inject recent decisions into the session

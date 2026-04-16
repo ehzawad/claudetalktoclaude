@@ -17,7 +17,6 @@ Usage:
 
 import argparse
 import asyncio
-import fcntl
 import json
 import os
 import signal
@@ -25,16 +24,22 @@ import sys
 import time
 from pathlib import Path
 
+from .claude_cli import terminate_active_subprocesses
 from .config import (
-    CHRONICLE_DIR, EVENTS_FILE, OFFSET_FILE, PID_FILE,
+    CHRONICLE_DIR, CLAUDE_PROJECTS, EVENTS_FILE, OFFSET_FILE, PID_FILE,
     load_config, save_default_config,
 )
 from .extractor import extract_session
 from .filtering import should_skip
-from .storage import write_chronicle, already_chronicled
+from .locks import (
+    acquire_daemon_lock, daemon_lock_still_valid, daemon_is_running,
+    processing_lock,
+)
+from .mode import is_background_mode
+from .storage import (
+    is_succeeded, is_terminal_failure, write_chronicle,
+)
 from .summarizer import async_summarize_session
-
-CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 
 
 def _read_offset() -> int:
@@ -108,6 +113,10 @@ async def _process_batch(events: list[tuple[str, dict]], config: dict) -> list[t
     pending_writes = []
     retry = []
     for (sid, ev), result in zip(events, results):
+        # Python 3.14: CancelledError is a BaseException, not Exception.
+        # Re-raise so shutdown propagates and we don't silently drop sessions.
+        if isinstance(result, BaseException) and not isinstance(result, Exception):
+            raise result
         if isinstance(result, Exception):
             print(f"[chronicle] error processing {sid[:8]}: {result}",
                   file=sys.stderr)
@@ -118,7 +127,12 @@ async def _process_batch(events: list[tuple[str, dict]], config: dict) -> list[t
     pending_writes.sort(key=lambda pair: pair[0].start_time)
     for digest, entry in pending_writes:
         write_chronicle(entry, digest, max_retries=max_retries)
-        if entry.is_error and not already_chronicled(digest.session_id, digest.end_time):
+        # Requeue if the session still has no terminal outcome — i.e.,
+        # transient failure that hasn't hit max retries yet, or an INFRA
+        # error that doesn't count against retries.
+        if (entry.is_error
+                and not already_succeeded(digest.session_id)
+                and already_failed(digest.session_id) is None):
             for sid, ev in events:
                 if sid == digest.session_id:
                     retry.append((sid, ev))
@@ -128,7 +142,13 @@ async def _process_batch(events: list[tuple[str, dict]], config: dict) -> list[t
 
 
 def _read_new_events(offset: int) -> tuple[list[dict], int]:
-    """Read events from the JSONL file starting at the given byte offset."""
+    """Read events from the JSONL file starting at the given byte offset.
+
+    Never advance past a partial (unterminated) final line — if the hook
+    is mid-write when we read, we'd otherwise permanently skip the event.
+    Malformed COMPLETE lines (have a trailing \\n but fail json.loads) are
+    skipped with the offset advancing past them so they don't re-appear.
+    """
     if not EVENTS_FILE.exists():
         return [], offset
 
@@ -137,20 +157,30 @@ def _read_new_events(offset: int) -> tuple[list[dict], int]:
         print(f"[chronicle] offset ({offset}) exceeds file size ({file_size}), resetting to 0")
         offset = 0
 
-    events = []
     with open(EVENTS_FILE, "rb") as f:
         f.seek(offset)
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                events.append(json.loads(line))
-            except json.JSONDecodeError:
-                print("[chronicle] skipping malformed event line", file=sys.stderr)
-                continue
-        new_offset = f.tell()
+        buf = f.read()
 
+    events = []
+    pos = 0
+    last_complete_end = 0  # offset past the last \n we processed
+    while pos < len(buf):
+        nl = buf.find(b"\n", pos)
+        if nl == -1:
+            # Partial trailing line — hold it back for the next tick.
+            break
+        line = buf[pos:nl].strip()
+        pos = nl + 1
+        last_complete_end = pos
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            print("[chronicle] skipping malformed event line", file=sys.stderr)
+            continue
+
+    new_offset = offset + last_complete_end
     return events, new_offset
 
 
@@ -177,54 +207,19 @@ def _process_events(events: list[dict], pending_sessions: dict) -> bool:
     return activity
 
 
-_lock_fd = None  # Module-level storage for the lock file descriptor.
-                  # Raw int fds from os.open() aren't GC'd, but storing
-                  # explicitly documents intent and prevents future breakage.
-
+# Singleton and inode-validation helpers live in chronicle.locks now.
+# Keep these thin shims so external imports (batch.py, __main__.py) stay stable.
 
 def _acquire_lock() -> bool:
-    """Try to acquire singleton lock via PID file."""
-    global _lock_fd
-    PID_FILE.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(PID_FILE), os.O_CREAT | os.O_WRONLY)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        os.write(fd, str(os.getpid()).encode())
-        os.ftruncate(fd, len(str(os.getpid())))
-        _lock_fd = fd
-        return True
-    except (OSError, IOError):
-        os.close(fd)
-        return False
+    return acquire_daemon_lock()
 
 
 def _lock_still_valid() -> bool:
-    """Check that our lock FD still points to the on-disk PID file.
-
-    flock locks the inode, not the path. If the PID file is deleted and
-    recreated, our lock is on a deleted inode while a second daemon can
-    lock the new file. Detect this by comparing inodes.
-    """
-    if _lock_fd is None:
-        return False
-    try:
-        fd_stat = os.fstat(_lock_fd)
-        path_stat = os.stat(str(PID_FILE))
-        return fd_stat.st_ino == path_stat.st_ino and fd_stat.st_dev == path_stat.st_dev
-    except OSError:
-        return False
+    return daemon_lock_still_valid()
 
 
 def _is_running() -> tuple[bool, int | None]:
-    """Check if a daemon is already running."""
-    if not PID_FILE.exists():
-        return False, None
-    try:
-        pid = int(PID_FILE.read_text().strip())
-        os.kill(pid, 0)
-        return True, pid
-    except (ValueError, OSError):
-        return False, None
+    return daemon_is_running()
 
 
 def _scan_for_unprocessed(pending_sessions: dict, config: dict) -> int:
@@ -264,7 +259,12 @@ def _scan_for_unprocessed(pending_sessions: dict, config: dict) -> int:
             if session_id in pending_sessions:
                 continue
 
-            if already_chronicled(session_id, ""):
+            if is_succeeded(session_id):
+                continue
+
+            if is_terminal_failure(session_id):
+                # Given up on this one — user retries via
+                # `chronicle process --retry-failed`.
                 continue
 
             pending_sessions[session_id] = {
@@ -280,7 +280,18 @@ def _scan_for_unprocessed(pending_sessions: dict, config: dict) -> int:
 
 
 async def run_daemon_async():
-    """Fully async main daemon loop."""
+    """Fully async main daemon loop.
+
+    Behavior:
+    - Honors processing_mode=foreground by idling (not exiting) if a
+      stale service manager keeps respawning us.
+    - Acquires the singleton fcntl lock; exits with diagnostic on failure.
+    - Reads events, scans for un-evented sessions, debounces 5 minutes,
+      then processes under the processing lock so `chronicle process`
+      never races us.
+    - On SIGTERM/SIGINT/SIGHUP: sets stop_event, terminates in-flight
+      claude subprocesses via the registry in claude_cli.
+    """
     save_default_config()
 
     if not _acquire_lock():
@@ -288,12 +299,15 @@ async def run_daemon_async():
         if running:
             print(f"[chronicle] daemon already running (pid {pid})")
             sys.exit(1)
+        print("[chronicle] could not acquire singleton lock and no running "
+              "daemon detected — check permissions on "
+              f"{PID_FILE} and {CHRONICLE_DIR}", file=sys.stderr)
+        sys.exit(2)
 
     print(f"[chronicle] daemon started (pid {os.getpid()})")
 
-    # Handle graceful shutdown via asyncio event.
-    # Use loop.add_signal_handler (not signal.signal) so that set() is
-    # called safely from the event loop thread, not a signal handler context.
+    # Graceful shutdown via asyncio event — add_signal_handler so .set()
+    # runs in the loop thread, not in signal-handler context.
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
@@ -302,72 +316,109 @@ async def run_daemon_async():
     config = load_config()
     poll_interval = config.get("poll_interval_seconds", 5)
     offset = _read_offset()
-    pending_sessions = {}  # session_id -> event dict
-    last_activity = 0.0  # timestamp of ANY event from ANY session
-    last_scan = 0.0  # 0 triggers an immediate scan on first loop iteration
+    pending_sessions: dict = {}
+    last_activity = 0.0
+    last_scan = 0.0
+    idle_printed_once = False
 
-    while not stop_event.is_set():
-        try:
-            # If our PID file was deleted/recreated, another daemon owns it.
-            if not _lock_still_valid():
-                print("[chronicle] PID file replaced — another daemon took over, exiting")
-                break
+    try:
+        while not stop_event.is_set():
+            try:
+                # Self-disable if config says foreground. Idle rather than
+                # exit: with launchd KeepAlive, exit would be a restart loop.
+                if not is_background_mode():
+                    if not idle_printed_once:
+                        print("[chronicle] processing_mode=foreground — "
+                              "daemon idle (no auto-processing); run "
+                              "`chronicle uninstall-daemon` to remove this service",
+                              file=sys.stderr)
+                        idle_printed_once = True
+                    try:
+                        await asyncio.wait_for(stop_event.wait(), timeout=60.0)
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
+                idle_printed_once = False
 
-            config = load_config()
-            events, new_offset = _read_new_events(offset)
+                if not _lock_still_valid():
+                    print("[chronicle] PID file replaced — another daemon took over, exiting")
+                    break
 
-            if _process_events(events, pending_sessions):
-                last_activity = time.time()
+                config = load_config()
+                events, new_offset = _read_new_events(offset)
 
-            offset = new_offset
-
-            # Periodic scan for sessions that pre-date hook installation
-            scan_interval = config.get("scan_interval_minutes", 30) * 60
-            now = time.time()
-            if now - last_scan >= scan_interval:
-                queued = _scan_for_unprocessed(pending_sessions, config)
-                if queued:
-                    print(f"[chronicle] scan found {queued} un-chronicled session(s)")
-                    if not last_activity:
-                        last_activity = now  # kick the debounce timer
-                last_scan = now
-
-            # Only process when ALL sessions have been quiet for quiet_minutes
-            quiet_minutes = config.get("quiet_minutes", 5)
-            now = time.time()
-            global_quiet = (now - last_activity) >= (quiet_minutes * 60) if last_activity else False
-
-            if global_quiet and pending_sessions:
-                to_process = list(pending_sessions.items())
-                pending_sessions.clear()
-                try:
-                    retry = await _process_batch(to_process, config)
-                    if retry:
-                        for sid, ev in retry:
-                            pending_sessions[sid] = ev
-                        last_activity = time.time()
-                except Exception as e:
-                    print(f"[chronicle] batch error: {e}", file=sys.stderr)
-                    for sid, ev in to_process:
-                        pending_sessions[sid] = ev
+                if _process_events(events, pending_sessions):
                     last_activity = time.time()
 
-            # Only persist offset when pending_sessions is empty. While
-            # sessions are waiting for the debounce, they exist only in
-            # memory. Advancing the on-disk offset before they're processed
-            # means a daemon crash loses them permanently.
-            if not pending_sessions:
-                _save_offset(offset)
+                offset = new_offset
 
-        except Exception as e:
-            print(f"[chronicle] loop error: {e}", file=sys.stderr)
+                scan_interval = config.get("scan_interval_minutes", 30) * 60
+                now = time.time()
+                if now - last_scan >= scan_interval:
+                    queued = _scan_for_unprocessed(pending_sessions, config)
+                    if queued:
+                        print(f"[chronicle] scan found {queued} un-chronicled session(s)")
+                        if not last_activity:
+                            last_activity = now
+                    last_scan = now
 
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=poll_interval)
-        except asyncio.TimeoutError:
-            pass  # Normal — poll interval elapsed, loop again
+                quiet_minutes = config.get("quiet_minutes", 5)
+                now = time.time()
+                global_quiet = (
+                    (now - last_activity) >= (quiet_minutes * 60)
+                    if last_activity else False
+                )
 
-    print("[chronicle] daemon stopped")
+                if global_quiet and pending_sessions:
+                    to_process = list(pending_sessions.items())
+                    pending_sessions.clear()
+                    try:
+                        # Processing lock: prevents race with `chronicle process`.
+                        with processing_lock(blocking=False) as acquired:
+                            if not acquired:
+                                print("[chronicle] processing lock held by another "
+                                      "process (likely chronicle process) — "
+                                      "deferring", file=sys.stderr)
+                                for sid, ev in to_process:
+                                    pending_sessions[sid] = ev
+                                last_activity = time.time()
+                            else:
+                                retry = await _process_batch(to_process, config)
+                                if retry:
+                                    for sid, ev in retry:
+                                        pending_sessions[sid] = ev
+                                    last_activity = time.time()
+                    except asyncio.CancelledError:
+                        for sid, ev in to_process:
+                            pending_sessions[sid] = ev
+                        raise
+                    except Exception as e:
+                        print(f"[chronicle] batch error: {e}", file=sys.stderr)
+                        for sid, ev in to_process:
+                            pending_sessions[sid] = ev
+                        last_activity = time.time()
+
+                # Only persist offset when pending is empty, so a crash
+                # during debounce doesn't drop sessions.
+                if not pending_sessions:
+                    _save_offset(offset)
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"[chronicle] loop error: {e}", file=sys.stderr)
+
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=poll_interval)
+            except asyncio.TimeoutError:
+                pass
+    finally:
+        # Cleanly terminate in-flight claude subprocesses before we exit.
+        terminated = await terminate_active_subprocesses(grace_seconds=5.0)
+        if terminated.get("terminated"):
+            print(f"[chronicle] terminated {terminated['terminated']} in-flight "
+                  f"claude subprocess(es), killed {terminated['killed']}")
+        print("[chronicle] daemon stopped")
 
 
 def run_daemon():

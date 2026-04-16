@@ -19,18 +19,17 @@ import sys
 import time
 from pathlib import Path
 
-from .config import CHRONICLE_DIR, load_config, save_default_config
-from .daemon import _is_running
+from .config import CHRONICLE_DIR, CLAUDE_PROJECTS, load_config, save_default_config
 from .extractor import extract_session
 from .filtering import should_skip
+from .locks import processing_lock
+from .mode import is_background_mode
+from .service import pause_service, resume_service
 from .storage import (
     write_chronicle, session_filename,
     rebuild_prompts_section,
 )
 from .summarizer import async_summarize_session
-
-
-CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 
 
 def find_all_sessions(project_filter: str | None = None) -> list[tuple[str, Path]]:
@@ -90,6 +89,7 @@ async def async_batch_process(
     dry_run: bool = False,
     workers: int = 5,
     force: bool = False,
+    retry_failed: bool = False,
 ):
     """Process all existing sessions with parallel workers."""
     save_default_config()
@@ -103,6 +103,7 @@ async def async_batch_process(
     eligible = []
     skip_count = 0
     already_done = 0
+    failed_skipped = 0
 
     for project_slug, jsonl_path in sessions:
         try:
@@ -112,10 +113,12 @@ async def async_batch_process(
             skip_count += 1
             continue
 
-        reason = should_skip(digest, config, force=force)
+        reason = should_skip(digest, config, force=force, retry_failed=retry_failed)
         if reason:
             if reason == "already chronicled":
                 already_done += 1
+            elif reason == "terminal failure":
+                failed_skipped += 1
             else:
                 skip_count += 1
             continue
@@ -142,6 +145,8 @@ async def async_batch_process(
     if not eligible:
         print("Nothing to process.")
         print(f"  Skipped: {skip_count}, Already done: {already_done}")
+        if failed_skipped:
+            print(f"  Terminal failures (use --retry-failed to retry): {failed_skipped}")
         if already_done:
             from .config import project_chronicle_dir
             print("\nAlready chronicled sessions:")
@@ -208,6 +213,8 @@ async def async_batch_process(
     print(f"  Processed: {process_count}")
     print(f"  Skipped: {skip_count}")
     print(f"  Already chronicled: {already_done}")
+    if failed_skipped:
+        print(f"  Terminal failures (use --retry-failed to retry): {failed_skipped}")
     if error_count:
         print(f"  Errors: {error_count}")
     if already_done:
@@ -225,55 +232,42 @@ def main():
     parser.add_argument("--workers", type=int, default=5,
                         help="Number of parallel workers (default: 5)")
     parser.add_argument("--force", action="store_true",
-                        help="Reprocess already-chronicled sessions")
+                        help="Reprocess already-chronicled (success) sessions")
+    parser.add_argument("--retry-failed", action="store_true",
+                        help="Retry sessions in .failed/ terminal state "
+                             "(e.g. after fixing a PATH or config issue)")
     args = parser.parse_args()
 
-    # Stop daemon to avoid duplicate processing — it'll respawn on next SessionStart
-    daemon_was_running = False
-    running, pid = _is_running()
-    if running and not args.dry_run:
-        os.kill(pid, signal.SIGTERM)
-        daemon_was_running = True
-        # Wait for actual exit — daemon may be mid-summarization (up to 300s)
-        for _ in range(30):
-            time.sleep(1)
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                break
-        else:
-            # Still alive after 30s, force kill
-            try:
-                os.kill(pid, signal.SIGKILL)
-                time.sleep(1)
-            except ProcessLookupError:
-                pass
-        print(f"Stopped daemon (pid {pid}) to avoid duplicate processing.")
+    # In background mode, pause the service manager so launchd/systemd
+    # doesn't respawn the daemon while we process. The processing lock
+    # is the hard correctness boundary; service pause is hygiene.
+    paused = False
+    if is_background_mode() and not args.dry_run:
+        paused = pause_service()
+        if paused:
+            print("Paused background daemon service (will resume after processing).")
 
     try:
-        asyncio.run(async_batch_process(
-            project_filter=args.project,
-            dry_run=args.dry_run,
-            workers=args.workers,
-            force=args.force,
-        ))
+        # Processing lock blocks until acquired. If the daemon is mid-batch
+        # (unlikely after pause_service, but possible before SIGTERM lands),
+        # we wait for it to finish cleanly.
+        with processing_lock(blocking=True):
+            asyncio.run(async_batch_process(
+                project_filter=args.project,
+                dry_run=args.dry_run,
+                workers=args.workers,
+                force=args.force,
+                retry_failed=args.retry_failed,
+            ))
     except KeyboardInterrupt:
         print("\n\nInterrupted. Already-processed sessions will be skipped on retry.")
     except Exception as e:
         print(f"\nError: {e}", file=sys.stderr)
         sys.exit(1)
     finally:
-        if daemon_was_running and not args.dry_run:
-            log_file = CHRONICLE_DIR / "daemon.log"
-            with open(log_file, "a") as log_fd:
-                subprocess.Popen(
-                    [sys.executable, "-m", "chronicle.daemon"],
-                    start_new_session=True,
-                    stdin=subprocess.DEVNULL,
-                    stdout=log_fd,
-                    stderr=log_fd,
-                )
-            print("Restarted daemon.")
+        if paused:
+            resume_service()
+            print("Resumed background daemon service.")
 
 
 if __name__ == "__main__":

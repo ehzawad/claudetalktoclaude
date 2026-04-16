@@ -8,10 +8,22 @@ CHRONICLE_DIR = Path.home() / ".chronicle"
 EVENTS_FILE = CHRONICLE_DIR / "events.jsonl"
 OFFSET_FILE = CHRONICLE_DIR / "events.offset"
 PID_FILE = CHRONICLE_DIR / "daemon.pid"
+PROCESSING_LOCK = CHRONICLE_DIR / "processing.lock"
 CONFIG_FILE = CHRONICLE_DIR / "config.json"
 PROJECTS_DIR = CHRONICLE_DIR / "projects"
+PROCESSED_DIR = CHRONICLE_DIR / ".processed"
+FAILED_DIR = CHRONICLE_DIR / ".failed"
+
+# Claude Code's session transcript storage — the source of truth chronicle reads from.
+CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
+
+# Processing modes:
+#   "foreground" — no daemon; user runs `chronicle process` on demand. Default.
+#   "background" — daemon auto-summarizes via launchd/systemd.
+PROCESSING_MODES = ("foreground", "background")
 
 DEFAULT_CONFIG = {
+    "processing_mode": "foreground",
     "concurrency": 5,
     "model": "opus",
     "poll_interval_seconds": 5,

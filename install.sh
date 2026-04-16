@@ -144,7 +144,16 @@ mkdir -p "$HOME/.claude"
 # 8. Set secure permissions
 chmod 700 "$HOME/.chronicle" 2>/dev/null || true
 
-# 9. Verify
+# 9. Optional: enable background mode if user explicitly opted in via env var
+if [ "${CHRONICLE_MODE:-foreground}" = "background" ]; then
+    echo ""
+    echo "CHRONICLE_MODE=background set — installing background daemon..."
+    "$INSTALL_DIR/.venv/bin/chronicle" install-daemon || {
+        echo "  (daemon install failed; you can run \`chronicle install-daemon\` manually later)"
+    }
+fi
+
+# 10. Verify
 echo ""
 echo "Verifying installation..."
 if command -v chronicle-hook >/dev/null 2>&1 && command -v chronicle >/dev/null 2>&1; then
@@ -154,14 +163,33 @@ if command -v chronicle-hook >/dev/null 2>&1 && command -v chronicle >/dev/null 
     echo ""
     echo "Installation complete!"
     echo ""
-    echo "Restart Claude Code to activate hooks."
-    echo "After that, everything is automatic."
+    echo "Mode: ${CHRONICLE_MODE:-foreground} (default is foreground)"
     echo ""
-    echo "Commands:"
-    echo "  chronicle query sessions    # check current project"
+    if [ "${CHRONICLE_MODE:-foreground}" = "foreground" ]; then
+        echo "Foreground mode: hooks record session events and inject past titles"
+        echo "into new Claude Code sessions. Summarization happens only when you"
+        echo "explicitly run one of:"
+        echo "  chronicle process --workers 5   # summarize pending sessions"
+        echo "  chronicle insight               # HTML dashboard"
+        echo "  chronicle story                 # unified narrative"
+        echo ""
+        echo "To switch to automatic background processing (burns tokens passively):"
+        echo "  chronicle install-daemon"
+    else
+        echo "Background mode: launchd/systemd service auto-summarizes sessions"
+        echo "after a quiet window. Check status:"
+        echo "  chronicle doctor"
+        echo "Switch back to foreground:"
+        echo "  chronicle uninstall-daemon"
+    fi
+    echo ""
+    echo "Restart Claude Code so hooks take effect."
+    echo ""
+    echo "Other useful commands:"
+    echo "  chronicle doctor            # diagnose config / claude resolution"
+    echo "  chronicle query projects    # per-project session counts"
     echo "  chronicle query timeline    # recent decisions"
-    echo "  chronicle process --workers 5 # process all past sessions"
-    echo "  chronicle reload            # after pulling new code"
+    echo "  chronicle reload            # rebuild venv + restart daemon if running"
 else
     echo ""
     echo "WARNING: Commands not in current PATH."

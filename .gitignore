@@ -7,3 +7,5 @@ build/
 .venv/
 .chronicle/
 .claude/
+.pytest_cache/
+claude-code-docs/

@@ -270,7 +270,8 @@ def show_diff(sessions: list[dict], target_num: int):
 def summarize_range(sessions: list[dict], start_num: int):
     """AI-summarize sessions from start_num through latest."""
     import asyncio
-    import json
+
+    from .claude_cli import spawn_claude
 
     subset = [s for s in sessions if s["number"] >= start_num]
     if not subset:
@@ -309,40 +310,14 @@ Keep it under 300 words.
     print(f"  Summarizing sessions #{start_num}–#{sessions[-1]['number']}...\n")
 
     async def _summarize():
-        # Strip ANTHROPIC_API_KEY so claude -p uses paid subscription.
-        env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
-
         fallback = config.get("fallback_model", "sonnet")
-        proc = await asyncio.create_subprocess_exec(
-            "claude", "-p",
-            "--model", model,
-            "--output-format", "json",
-            "--no-session-persistence",
-            "--effort", "low",
-            "--fallback-model", fallback,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
+        res = await spawn_claude(
+            prompt=prompt, model=model, fallback_model=fallback,
+            effort="low", timeout=300,
         )
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(prompt.encode()), timeout=300
-            )
-        except asyncio.TimeoutError:
-            try:
-                proc.kill()
-                await proc.communicate()
-            except Exception:
-                pass
+        if not res.ok:
             return None
-        if proc.returncode != 0:
-            return None
-        try:
-            data = json.loads(stdout.decode())
-            return data.get("result", stdout.decode())
-        except json.JSONDecodeError:
-            return stdout.decode()
+        return (res.stdout_json or {}).get("result", "")
 
     try:
         result = asyncio.run(_summarize())

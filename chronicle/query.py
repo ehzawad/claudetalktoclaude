@@ -229,48 +229,75 @@ def show_project(name: str):
 
 
 def list_projects():
-    """List all chronicled projects and any pending (un-chronicled) projects."""
-    chronicled = {}  # slug -> session count
-    if PROJECTS_DIR.exists():
-        for project_dir in sorted(PROJECTS_DIR.iterdir()):
-            if not project_dir.is_dir():
-                continue
-            sessions_dir = project_dir / "sessions"
-            count = len(list(sessions_dir.glob("*.md"))) if sessions_dir.exists() else 0
-            if count:
-                chronicled[project_dir.name] = count
+    """List projects with per-session breakdown: processed / pending / failed.
 
-    # Also check for un-chronicled sessions in ~/.claude/projects/
+    For each project slug (present under ~/.claude/projects/ or ~/.chronicle/projects/):
+      - processed: sessions with a success marker AND a session .md file
+      - failed (terminal): sessions in .failed/ with terminal=true
+      - pending: jsonl exists but no success marker, no terminal-failure marker
+    """
+    from .storage import is_succeeded, is_terminal_failure
     claude_projects = Path.home() / ".claude" / "projects"
-    pending = {}  # slug -> jsonl count
-    if claude_projects.exists():
-        for project_dir in sorted(claude_projects.iterdir()):
-            if not project_dir.is_dir():
-                continue
-            slug = project_dir.name
-            if slug in chronicled:
-                continue  # already processed
-            count = len([f for f in project_dir.glob("*.jsonl") if "subagent" not in str(f)])
-            if count:
-                pending[slug] = count
 
-    if not chronicled and not pending:
+    # Gather slugs from both sides
+    slugs: set[str] = set()
+    if PROJECTS_DIR.exists():
+        for d in PROJECTS_DIR.iterdir():
+            if d.is_dir():
+                slugs.add(d.name)
+    if claude_projects.exists():
+        for d in claude_projects.iterdir():
+            if d.is_dir():
+                slugs.add(d.name)
+
+    if not slugs:
         print("No chronicles and no sessions found.")
         print("Start a coding session first, then run: chronicle process --workers 5")
         return
 
-    if chronicled:
-        for slug, count in sorted(chronicled.items()):
-            print(f"  {slug}: {count} sessions")
+    totals = {"processed": 0, "pending": 0, "failed": 0}
+    rows: list[tuple[str, int, int, int]] = []
 
-    if pending:
-        if chronicled:
-            print()
-        print(f"  Pending ({len(pending)} projects, "
-              f"{sum(pending.values())} sessions):")
-        for slug, count in sorted(pending.items()):
-            print(f"    {slug}: {count} sessions")
-        print(f"\n  Process:  chronicle process --workers 5")
+    for slug in sorted(slugs):
+        processed = 0
+        pending = 0
+        failed = 0
+
+        cp_slug = claude_projects / slug
+        if cp_slug.exists():
+            for jsonl in cp_slug.glob("*.jsonl"):
+                if "subagents" in str(jsonl):
+                    continue
+                sid = jsonl.stem
+                if is_succeeded(sid):
+                    processed += 1
+                elif is_terminal_failure(sid):
+                    failed += 1
+                else:
+                    pending += 1
+
+        totals["processed"] += processed
+        totals["pending"] += pending
+        totals["failed"] += failed
+        rows.append((slug, processed, pending, failed))
+
+    print(f"  {'Project':50}  {'OK':>4}  {'Pend':>4}  {'Fail':>4}")
+    print(f"  {'─' * 50}  {'─' * 4}  {'─' * 4}  {'─' * 4}")
+    for slug, p, pe, f in rows:
+        if p + pe + f == 0:
+            continue
+        short = slug if len(slug) <= 50 else slug[:47] + "..."
+        print(f"  {short:50}  {p:>4}  {pe:>4}  {f:>4}")
+    print(f"  {'─' * 50}  {'─' * 4}  {'─' * 4}  {'─' * 4}")
+    print(f"  {'Total':50}  {totals['processed']:>4}  "
+          f"{totals['pending']:>4}  {totals['failed']:>4}")
+
+    if totals["pending"]:
+        print(f"\n  Process pending:    chronicle process --workers 5")
+    if totals["failed"]:
+        print(f"  Retry failed:       chronicle process --retry-failed --workers 5")
+        print(f"                      (first run `chronicle doctor` to verify "
+              f"the failure reason is fixed)")
 
 
 def main():
