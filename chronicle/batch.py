@@ -111,6 +111,10 @@ async def async_batch_process(
     """Process all existing sessions with parallel workers."""
     save_default_config()
     config = load_config()
+    # Honor ~/.chronicle/config.json's max_retries; the daemon does. Without
+    # this, `chronicle process` silently used the storage.write_chronicle
+    # default (3) regardless of config.
+    max_retries = int(config.get("max_retries", 3))
     sessions = find_all_sessions(project_filter)
 
     print(f"Found {len(sessions)} session files across "
@@ -206,7 +210,7 @@ async def async_batch_process(
         entry = result
         # Use the same write path as the daemon — handles retries,
         # cost persistence, and empty sessions consistently
-        write_chronicle(entry, digest)
+        write_chronicle(entry, digest, max_retries=max_retries)
         if entry.is_error:
             print(f"  RETRY-LATER {digest.session_id[:8]}: transient failure")
             error_count += 1

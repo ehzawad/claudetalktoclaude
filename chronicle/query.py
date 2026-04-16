@@ -10,6 +10,7 @@ Usage:
 import argparse
 import os
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -149,8 +150,13 @@ def sessions(project_path: str | None = None):
                           "Run `chronicle doctor`.")
                 else:
                     print("Mode=foreground — summarization only happens on demand.")
+                # `batch.find_all_sessions` substring-matches --project
+                # against the slugged directory name under ~/.claude/projects/,
+                # not against raw filesystem paths. Print the resolved slug so
+                # the suggested command actually works when copy-pasted.
+                process_filter = claude_sessions.name
                 print("\nTo process now:")
-                print(f"  chronicle process --project {cwd} --workers 5")
+                print(f"  chronicle process --project {shlex.quote(process_filter)} --workers 5")
                 return
         print(f"No sessions found for '{cwd}'")
         return
