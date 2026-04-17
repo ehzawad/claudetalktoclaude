@@ -6,7 +6,7 @@ set -euo pipefail
 #   curl -fsSL https://raw.githubusercontent.com/ehzawad/claudetalktoclaude/main/install.sh | bash
 #
 # Environment overrides (for testing / pinning):
-#   CHRONICLE_VERSION  — git tag, e.g. v0.8.0. Default: latest release.
+#   CHRONICLE_VERSION  — git tag, e.g. vX.Y.Z. Default: latest release.
 #   CHRONICLE_BASE_URL — override download host (e.g. local mirror).
 #   CHRONICLE_HOME     — data + runtime root. Default: $HOME/.chronicle.
 

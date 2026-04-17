@@ -37,6 +37,34 @@ chronicle install-daemon            # → background
 chronicle uninstall-daemon          # → foreground
 ```
 
+### What `install.sh` actually does
+
+```mermaid
+flowchart TB
+    START([curl -fsSL install.sh &#124; bash]) --> PLAT["detect platform<br/>(darwin-arm64 / linux-x86_64)"]
+    PLAT --> DEPS["check curl, tar, claude<br/>(fail fast if missing)"]
+    DEPS --> URLS["resolve asset URL<br/>(latest or CHRONICLE_VERSION)"]
+    URLS --> DL["download chronicle-$TARGET.tar.gz<br/>+ chronicle-$TARGET.tar.gz.sha256"]
+    DL --> VERIFY{"SHA256 match?"}
+    VERIFY -->|no| ABORT([abort — no files touched])
+    VERIFY -->|yes| STOPD["if daemon running,<br/>send SIGTERM before<br/>overwriting binary"]
+    STOPD --> LEGACY{"legacy<br/>~/.chronicle/src ?"}
+    LEGACY -->|yes| WIPE["rm -rf legacy<br/>source-tree install<br/>(pre-v0.8.0)"]
+    LEGACY -->|no| SWAP
+    WIPE --> SWAP["atomic swap:<br/>runtime.new &rarr; runtime<br/>runtime &rarr; runtime.old &rarr; rm"]
+    SWAP --> QUAR["macOS: xattr -dr<br/>com.apple.quarantine<br/>(skip Gatekeeper kill)"]
+    QUAR --> LINK["symlink<br/>~/.local/bin/chronicle{,-hook}<br/>&rarr; runtime/chronicle"]
+    LINK --> HOOKS["chronicle install-hooks<br/>(merge into ~/.claude/settings.json)"]
+    HOOKS --> CHMOD["chmod 700 ~/.chronicle/"]
+    CHMOD --> BG{"mode ==<br/>background<br/>(from config) ?"}
+    BG -->|yes| KICK["launchctl kickstart /<br/>systemctl restart<br/>(new binary hot)"]
+    BG -->|no| DONE
+    KICK --> DONE([restart Claude Code])
+
+    CU[["chronicle update"]] -.->|re-runs install.sh<br/>one source of truth| START
+    CUN[["chronicle uninstall<br/>[--purge]"]] -->|inverse path:<br/>stop daemon &rarr; strip hooks &rarr;<br/>rm symlinks &rarr; rm runtime/| CDN([user data preserved<br/>unless --purge])
+```
+
 ---
 
 ## Processing modes
@@ -52,6 +80,39 @@ chronicle uninstall-daemon          # → foreground
 | Disable | (default) | `chronicle uninstall-daemon` |
 
 Mode is stored in `~/.chronicle/config.json` under `processing_mode`. `chronicle doctor` reports current mode plus any drift (e.g., config says foreground but a stale daemon is running).
+
+### Config authority vs. observed effects
+
+```mermaid
+flowchart LR
+    CFG[("config.json<br/>processing_mode<br/><b>authoritative</b>")]
+    SVC[("service file<br/>plist / unit<br/><i>managed effect</i>")]
+    DP[("daemon process<br/><i>managed effect</i>")]
+
+    ID[["chronicle install-daemon"]]
+    UD[["chronicle uninstall-daemon"]]
+
+    ID -->|1 set mode=background| CFG
+    ID -->|2 write service file| SVC
+    ID -->|3 bootstrap| DP
+    UD -->|1 bootout| DP
+    UD -->|2 remove service file| SVC
+    UD -->|3 set mode=foreground| CFG
+
+    CFG --> DOC{chronicle doctor}
+    SVC --> DOC
+    DP --> DOC
+
+    DOC -->|mode=fg, nothing loaded| OK1([OK])
+    DOC -->|mode=bg, service running| OK2([OK])
+    DOC -->|mode=fg + service still loaded| W1["drift:<br/>run uninstall-daemon"]
+    DOC -->|mode=bg + service missing| W2["drift:<br/>run install-daemon"]
+    DOC -->|mode=bg + loaded but not running| W3["drift:<br/>check daemon.log"]
+    DOC -->|claude binary unresolved| F1["fail:<br/>install Claude Code"]
+    DOC -->|config.json unreadable| F2["fail:<br/>repair config"]
+
+    SELF[["daemon loop reads<br/>config each tick"]] -.->|if mode flipped to fg,<br/>idle — do NOT exit<br/>(avoids launchd KeepAlive<br/>restart loop)| DP
+```
 
 ---
 
@@ -117,6 +178,56 @@ chronicle --version
 **Substring project matching** — `--project <name>` matches any slug containing `<name>`. So `--project my-api` finds `-Users-alice-my-api`. See all your slugs: `chronicle query projects`.
 
 **Marker state** — each session is in exactly one state: unprocessed (no marker), success (`.processed/<hash>`), or failed (`.failed/<hash>.json` with `terminal` flag + attempt counter). See [State and failures](#state-and-failures).
+
+---
+
+## Hook dispatch
+
+Every Claude Code event fires `chronicle-hook` (the same binary, dispatched by `argv[0]` via `_entrypoint.py`). Every event always appends a line to `events.jsonl`; only `SessionStart` does anything extra.
+
+```mermaid
+flowchart TB
+    CC["Claude Code<br/>(hook event JSON on stdin)"] --> HOOK["chronicle-hook"]
+    HOOK --> APPEND[("append event to<br/>~/.chronicle/events.jsonl<br/><b>always, for every event</b>")]
+    APPEND --> EVT{"hook_event_name"}
+
+    EVT -->|"UserPromptSubmit"| RET([exit 0])
+    EVT -->|"Stop"| RET
+    EVT -->|"SessionEnd"| RET
+    EVT -->|"SessionStart"| SS_CTX
+
+    subgraph SS_CTX["SessionStart: inject past-session context"]
+        direction TB
+        LOAD["slug = cwd.replace('/', '-')<br/>load_recent_titles(slug, max=10)"]
+        HAS{"titles ?"}
+        EMIT["print JSON on stdout:<br/>hookSpecificOutput.additionalContext<br/>= 'Previous sessions: …'"]
+        NOEMIT["no stdout<br/>(no empty-context noise)"]
+        LOAD --> HAS
+        HAS -->|yes| EMIT
+        HAS -->|no| NOEMIT
+    end
+
+    subgraph SS_DAEMON["SessionStart: self-heal daemon (bg mode only)"]
+        direction TB
+        BG{"processing_mode<br/>== background ?"}
+        ALIVE{"_daemon_running()<br/>via pid file + kill(pid, 0) ?"}
+        RESP["_spawn_daemon()<br/>argv = _spawn_daemon_cmd()<br/>• frozen → [chronicle, daemon]<br/>• dev    → [python, -m, chronicle.daemon]"]
+        NOOP["skip"]
+        FG["NEVER spawn —<br/>foreground = zero<br/>passive token burn"]
+        BG -->|yes| ALIVE
+        ALIVE -->|no| RESP
+        ALIVE -->|yes| NOOP
+        BG -->|no| FG
+    end
+
+    EVT -.->|SessionStart also runs| SS_DAEMON
+    SS_CTX --> RET
+    SS_DAEMON --> RET
+
+    ERR["any exception?<br/>trap + log to<br/>~/.chronicle/hook-errors.log"] -.->|never raise<br/>(must not block the session)| RET
+```
+
+> The service manager's own respawn (launchd `KeepAlive` / systemd `Restart=on-failure`) is the primary recovery path. `_spawn_daemon` is defense-in-depth for the window between a daemon crash and the service manager noticing.
 
 ---
 
@@ -186,6 +297,45 @@ Only relevant if you `chronicle install-daemon`.
 - **Graceful shutdown.** On SIGTERM/SIGINT/SIGHUP, the daemon terminates in-flight `claude` subprocesses (SIGTERM then SIGKILL after 5s) before exiting.
 - **Service-manager-aware batch.** In background mode, `chronicle process` pauses the service (`launchctl bootout` / `systemctl --user stop`) and holds the processing lock, then resumes after. In foreground mode the pause step is a no-op and only the processing lock is taken.
 - **Self-disable.** If config says foreground but the service respawned the daemon anyway, the daemon idles instead of exiting — avoids a KeepAlive restart loop.
+
+### Concurrency: how the daemon and `chronicle process` don't race
+
+Two `fcntl.flock` locks cover every way sessions can get summarized. Both are released automatically when the owning process exits — crashes don't wedge anything.
+
+```mermaid
+flowchart TB
+    subgraph locks["fcntl locks (released on process exit)"]
+        direction LR
+        L1[("daemon.pid<br/><b>singleton:</b> at most one daemon")]
+        L2[("processing.lock<br/><b>mutex:</b> daemon XOR chronicle process")]
+    end
+
+    subgraph daemon_side["daemon.py (background only)"]
+        direction TB
+        D1["acquire_daemon_lock()<br/>LOCK_EX &#124; LOCK_NB"]
+        D2["inode check each loop tick"]
+        D3["non-blocking acquire of<br/>processing.lock before<br/>each debounced batch"]
+        D4{"lock still on<br/>same inode ?"}
+        D1 --> D2 --> D3
+        D2 -.-> D4
+        D4 -->|no| BAIL["another daemon took over<br/>(PID file replaced)<br/>&rarr; exit cleanly"]
+    end
+
+    subgraph batch_side["batch.py (chronicle process)"]
+        direction TB
+        B1["is_background_mode() ?<br/>→ pause_service()<br/>(launchctl bootout /<br/>systemctl stop)"]
+        B2["<b>blocking</b> acquire of<br/>processing.lock<br/>(waits out an in-flight<br/>daemon batch)"]
+        B3["summarize workers<br/>(parallel, semaphore)"]
+        B4["release lock<br/>finally: resume_service()"]
+        B1 --> B2 --> B3 --> B4
+    end
+
+    D1 --> L1
+    D3 --> L2
+    B2 --> L2
+
+    note["<b>Invariants</b><br/>• at most 1 daemon per host (L1)<br/>• at most 1 summarizer holder (L2)<br/>• service pause is hygiene;<br/>  processing.lock is correctness"]
+```
 
 ---
 
