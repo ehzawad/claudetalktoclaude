@@ -189,6 +189,27 @@ class TestAdditionalContextInjection:
         assert out.strip() == ""
 
 
+class TestSpawnDaemonCommand:
+    """`_spawn_daemon_cmd` has to branch on sys.frozen so the respawn works
+    under both the PyInstaller binary and dev checkouts. Regression against
+    the silent-no-op bug where `[sys.executable, '-m', 'chronicle.daemon']`
+    was fed to the frozen binary (which ignores `-m`)."""
+
+    def test_dev_uses_module_entry(self, monkeypatch):
+        import chronicle.hook as hook_mod
+        monkeypatch.setattr(sys, "frozen", False, raising=False)
+        cmd = hook_mod._spawn_daemon_cmd()
+        assert cmd == [sys.executable, "-m", "chronicle.daemon"]
+
+    def test_frozen_uses_subcommand(self, monkeypatch):
+        import chronicle.hook as hook_mod
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        cmd = hook_mod._spawn_daemon_cmd()
+        assert cmd == [sys.executable, "daemon"], (
+            "PyInstaller bootloader ignores -m; must use 'daemon' subcommand"
+        )
+
+
 class TestErrorTrapping:
     def test_malformed_stdin_does_not_crash(self, chronicle_env, monkeypatch):
         """A bug in hook.py MUST NOT propagate — it would block the user's

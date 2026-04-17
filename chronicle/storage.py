@@ -133,8 +133,6 @@ def list_failed(*, terminal_only: bool = False) -> list[dict]:
     return out
 
 
-
-
 def slugify(text: str, max_len: int = 40) -> str:
     """Turn text into a filename-safe slug."""
     slug = text.lower()
@@ -189,10 +187,9 @@ def clear_session_markers(session_id: str):
             continue
 
 
-
-
 def delete_session(session_path, slug: str):
-    """Delete a session .md file, its chronicle.md entry, and its processed marker.
+    """Delete a session .md file, its chronicle.md entry, and all of its
+    marker state (both `.processed/` success and `.failed/` failure records).
 
     Does NOT touch ~/.claude/ — only chronicle's own data.
     """

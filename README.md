@@ -20,7 +20,7 @@ curl -fsSL https://raw.githubusercontent.com/ehzawad/claudetalktoclaude/main/ins
 curl -fsSL https://raw.githubusercontent.com/ehzawad/claudetalktoclaude/main/install.sh | bash && chronicle install-daemon
 ```
 
-Pin a specific release: `CHRONICLE_VERSION=v0.8.0 curl ... | bash`. Upgrade: `chronicle update`.
+Pin a specific release: `CHRONICLE_VERSION=vX.Y.Z curl ... | bash`. Upgrade: `chronicle update`.
 
 Restart Claude Code to activate hooks. Then:
 
@@ -184,7 +184,7 @@ Only relevant if you `chronicle install-daemon`.
 - **Parallel workers.** Up to `concurrency` (default 5) summarizations run concurrently via `asyncio.Semaphore`. Each worker is an independent `claude -p` subprocess.
 - **Singleton.** Single daemon enforced by `fcntl.flock` on `~/.chronicle/daemon.pid` plus inode-validation to detect PID-file replacement.
 - **Graceful shutdown.** On SIGTERM/SIGINT/SIGHUP, the daemon terminates in-flight `claude` subprocesses (SIGTERM then SIGKILL after 5s) before exiting.
-- **Service-manager-aware batch.** `chronicle process` pauses the service (`launchctl bootout` / `systemctl --user stop`) and holds the processing lock, then resumes after.
+- **Service-manager-aware batch.** In background mode, `chronicle process` pauses the service (`launchctl bootout` / `systemctl --user stop`) and holds the processing lock, then resumes after. In foreground mode the pause step is a no-op and only the processing lock is taken.
 - **Self-disable.** If config says foreground but the service respawned the daemon anyway, the daemon idles instead of exiting — avoids a KeepAlive restart loop.
 
 ---
@@ -258,6 +258,7 @@ Each project gets up to three views:
   daemon.pid                            # singleton lock (background only)
   daemon.log                            # daemon stdout/stderr (background only)
   processing.lock                       # mutex between daemon and `chronicle process`
+  runtime/                              # unpacked PyInstaller binary (`chronicle update` swaps this atomically)
   .processed/<hash>                     # success marker
   .failed/<hash>.json                   # failure record (attempts, terminal, error)
   projects/<slug>/
@@ -300,7 +301,7 @@ Turn-by-turn log · decisions with status + rationale + alternatives · problems
 - **Secret redaction.** All tool outputs pass through a pattern scanner before any markdown is written. API keys (`sk-`, `ghp_`, `AKIA`, `xoxb-`), auth headers (`Bearer …`), private keys (`-----BEGIN …`), JWTs (`eyJ…`), connection URIs (`postgres://user:pass@…`), and env-var assignments (`API_KEY=…`, `SECRET=…`) are replaced with `[REDACTED]`. `.env`, `.pem`, and `.key` file content is fully redacted.
 - **Subscription routing.** Every `claude -p` subprocess call strips `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_BASE_URL` from the environment — summarization always routes through your Claude.ai subscription, never API credits or a proxy gateway ([anthropics/claude-code#2051](https://github.com/anthropics/claude-code/issues/2051)).
 - **File permissions.** `~/.chronicle/` is `0700` (owner-only), matching `~/.claude/`.
-- **Observer-only.** Chronicle never writes to `~/.claude/`, never blocks a hook, never modifies Claude Code behavior. The only effect on the active session is the `additionalContext` injection of past session titles on SessionStart. All deletion operations (`rewind --delete`, `--prune`) only touch chronicle's own markdown and markers — the original JSONL in `~/.claude/projects/` stays.
+- **Observer-only at runtime.** Chronicle never writes to `~/.claude/projects/` (the session transcripts), never blocks a hook, never modifies Claude Code behavior. The only effect on an active session is the `additionalContext` injection of past session titles on SessionStart. All deletion operations (`rewind --delete`, `--prune`) only touch chronicle's own markdown and markers — the original JSONL in `~/.claude/projects/` stays. Install / uninstall are the one exception: `install-hooks` and `uninstall` do edit `~/.claude/settings.json` to add or remove the `chronicle-hook` entries, and they preserve any unrelated hook entries already there.
 
 ---
 
@@ -320,7 +321,7 @@ Common fixes:
 - **Mode drift warning.** Config says one mode but service state says another. `chronicle install-daemon` / `uninstall-daemon` reconciles.
 - **Terminal failures after fixing a config issue.** `chronicle process --retry-failed --workers 5`.
 - **Ubuntu background mode survives logout.** Run once: `sudo loginctl enable-linger "$USER"`.
-- **Scripted health check.** `chronicle doctor --json` emits a schema-versioned document with a top-level `ok: bool`; exit code is 0 if healthy, 1 if drift detected.
+- **Scripted health check.** `chronicle doctor --json` emits a schema-versioned document with a top-level `ok: bool`; exit code is 0 if healthy, 1 if any of: drift detected, `claude` binary unresolved, or `config.json` unreadable.
 
 ---
 
@@ -330,7 +331,7 @@ Common fixes:
 chronicle/
   __main__.py          # CLI dispatcher (process / query / rewind / insight /
                        #   story / doctor / install-daemon / uninstall-daemon /
-                       #   daemon / install-hooks / update)
+                       #   daemon / install-hooks / update / uninstall)
   _entrypoint.py       # PyInstaller busybox dispatcher — argv[0] picks
                        #   between chronicle CLI and chronicle-hook
   hook.py              # hook dispatcher — logs events, injects context,

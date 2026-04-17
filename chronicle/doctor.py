@@ -211,7 +211,8 @@ def print_human(data: dict[str, Any]) -> None:
 
 
 def run(argv: Sequence[str] | None = None) -> int:
-    """Entry point. Returns 0 if no drift warnings, 1 otherwise.
+    """Entry point. Returns 0 iff diagnostics `ok` is true — i.e. no drift
+    warnings, `claude` resolved, and config.json parsed cleanly.
 
     `argv` lets tests pass flags without mutating sys.argv. When None,
     uses sys.argv[1:] (after the chronicle-dispatcher strip).

@@ -223,7 +223,8 @@ def _process_events(events: list[dict], pending_sessions: dict) -> bool:
 
 
 # Singleton and inode-validation helpers live in chronicle.locks now.
-# Keep these thin shims so external imports (batch.py, __main__.py) stay stable.
+# Thin shims kept so callers that still import from chronicle.daemon
+# (chronicle.query._is_running, older tests) don't have to chase the move.
 
 def _acquire_lock() -> bool:
     return acquire_daemon_lock()

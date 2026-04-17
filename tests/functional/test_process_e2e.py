@@ -10,7 +10,6 @@ behavior a user would see.
 from __future__ import annotations
 
 import os
-import shutil
 import stat
 import subprocess
 import sys
@@ -22,7 +21,6 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 FAKE_CLAUDE = Path(__file__).resolve().parent.parent / "fixtures" / "fake_claude.py"
-CHRONICLE_CLI = REPO_ROOT / ".venv" / "bin" / "chronicle"
 
 
 def _install_fake_claude(bin_dir: Path) -> None:
@@ -63,7 +61,8 @@ def _run_chronicle(args: list[str], *, home: Path, bin_dir: Path,
     env["HOME"] = str(home)
     env["PATH"] = f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin"
     env["FAKE_CLAUDE_MODE"] = fake_mode
-    # Ensure the test's venv python is used
+    # Invoke via the same interpreter running pytest, so the chronicle
+    # package resolves against the installed-editable checkout.
     cmd = [sys.executable, "-m", "chronicle"] + args
     return subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=60)
 

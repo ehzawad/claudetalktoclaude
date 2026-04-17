@@ -40,12 +40,25 @@ def _daemon_running() -> bool:
         return False
 
 
+def _spawn_daemon_cmd() -> list[str]:
+    """argv for respawning the daemon.
+
+    In a PyInstaller-frozen build, `sys.executable` is the `chronicle`
+    binary; the bootloader ignores `-m`, so we have to use the CLI's
+    `daemon` subcommand instead. In dev (non-frozen), `python -m
+    chronicle.daemon` runs the module directly.
+    """
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "daemon"]
+    return [sys.executable, "-m", "chronicle.daemon"]
+
+
 def _spawn_daemon():
     """Launch daemon in background, fully detached from this process."""
     log_file = chronicle_dir() / "daemon.log"
     with open(log_file, "a") as log_fd:
         subprocess.Popen(
-            [sys.executable, "-m", "chronicle.daemon"],
+            _spawn_daemon_cmd(),
             start_new_session=True,
             stdin=subprocess.DEVNULL,
             stdout=log_fd,
@@ -79,7 +92,9 @@ def main():
             if bg and not _daemon_running():
                 _spawn_daemon()
 
-            # Inject recent decisions into the session
+            # Inject recent session titles as additionalContext — the user's
+            # session sees "Previous sessions: …" without any tokens being
+            # spent on Chronicle's side.
             cwd = data.get("cwd", "")
             if cwd:
                 slug = cwd.replace("/", "-")

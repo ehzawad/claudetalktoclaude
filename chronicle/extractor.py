@@ -5,8 +5,12 @@ message exchanged in a session. This module extracts structured content
 preserving chronological order for high-fidelity summarization.
 
 Two output formats:
-- digest_to_text(): filtered/truncated for LLM context window (80K chars default)
-- timeline_to_log(): full raw content for the session markdown (no truncation)
+- digest_to_text(): filtered for LLM context window (80K chars default, with
+  front+tail middle-elision if the timeline exceeds it).
+- timeline_to_log(): redacted chronological log for the session markdown.
+  The full timeline is kept, but individual tool results above ~10KB are
+  capped with a front+tail split, and secrets are masked in commands, tool
+  inputs, and tool outputs by the same redaction layer.
 """
 
 import json

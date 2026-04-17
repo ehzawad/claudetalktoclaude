@@ -7,9 +7,13 @@ Responsibilities:
 - Detect mode drift (config says foreground but service loaded, etc.).
 
 Designed to work under both macOS Tahoe (launchd) and Ubuntu 24.04 LTS
-(systemd --user). All subprocess calls are best-effort: if the platform
-tool is missing or bootstrap fails for a benign reason, we fall back and
-let the processing lock protect correctness.
+(systemd --user). Status probes (`service_running`, `service_installed`,
+`mode_drift_warnings`) are best-effort — missing `launchctl`/`systemctl`
+degrades to "unknown" rather than raising. Install / bootstrap surfaces
+its failure: `install_service()` returns False when the manager rejected
+the job, and `install-daemon` rolls the config mode back so `chronicle
+doctor` doesn't lie about intent. The processing lock is the correctness
+boundary across all code paths.
 
 Service files always include a full PATH in EnvironmentVariables /
 Environment="PATH=..." so the daemon can find `claude` even when
@@ -329,6 +333,6 @@ def mode_drift_warnings() -> list[str]:
     elif mode == "background" and installed and not running:
         warnings.append(
             "Mode=background and service file present, but daemon not running. "
-            "Check daemon.log; try `chronicle reload`."
+            "Check daemon.log; re-run `chronicle install-daemon` to reinstall the service."
         )
     return warnings
