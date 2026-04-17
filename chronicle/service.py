@@ -53,7 +53,15 @@ def _standard_path() -> str:
 
 
 def _chronicle_binary() -> str:
-    """Absolute path to the chronicle entry point."""
+    """Absolute path to the chronicle entry point used in launchd / systemd unit files.
+
+    For frozen PyInstaller builds, prefer sys.executable — that's the actual
+    binary running right now. shutil.which can pick up a dev checkout, a
+    stale symlink, or an older release on PATH and bake that into the
+    service file, leading to subtle drift.
+    """
+    if getattr(sys, "frozen", False):
+        return str(Path(sys.executable).resolve())
     found = shutil.which("chronicle")
     if found:
         return found

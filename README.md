@@ -8,15 +8,19 @@ Records the *reasoning* behind your coding sessions — planning discussions, tr
 
 ## Quick start
 
-**Prerequisites:** macOS or Linux · Python 3.10+ · Claude Code CLI · Claude subscription (Pro / Max / Teams).
+**Prerequisites:** macOS (Apple Silicon) or Linux (x86_64) · Claude Code CLI · Claude subscription (Pro / Max / Teams).
+
+Chronicle ships as a prebuilt self-contained binary. No Python, venv, or system package dependencies on the target machine.
 
 ```bash
 # Default (foreground — zero passive token burn)
 curl -fsSL https://raw.githubusercontent.com/ehzawad/claudetalktoclaude/main/install.sh | bash
 
 # Background mode (daemon auto-summarizes after 5 min quiet)
-CHRONICLE_MODE=background curl -fsSL https://raw.githubusercontent.com/ehzawad/claudetalktoclaude/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ehzawad/claudetalktoclaude/main/install.sh | bash && chronicle install-daemon
 ```
+
+Pin a specific release: `CHRONICLE_VERSION=v0.8.0 curl ... | bash`. Upgrade: `chronicle update`.
 
 Restart Claude Code to activate hooks. Then:
 
@@ -93,7 +97,7 @@ chronicle doctor                      # human-readable diagnostic
 chronicle doctor --json               # machine-readable (CI-friendly)
 chronicle install-daemon              # switch to background mode
 chronicle uninstall-daemon            # switch to foreground mode
-chronicle reload                      # reinstall + restart daemon if running
+chronicle update                      # fetch + install the latest release, restart daemon if running
 chronicle --version
 ```
 
@@ -323,7 +327,9 @@ Common fixes:
 chronicle/
   __main__.py          # CLI dispatcher (process / query / rewind / insight /
                        #   story / doctor / install-daemon / uninstall-daemon /
-                       #   daemon / reload)
+                       #   daemon / install-hooks / update)
+  _entrypoint.py       # PyInstaller busybox dispatcher — argv[0] picks
+                       #   between chronicle CLI and chronicle-hook
   hook.py              # hook dispatcher — logs events, injects context,
                        #   spawns daemon (background only)
   daemon.py            # background poll loop, debounce, scan, parallel workers

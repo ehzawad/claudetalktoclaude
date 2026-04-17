@@ -44,8 +44,12 @@ Usage:
         `install-daemon` / `uninstall-daemon` above — which manages the
         service manager for you.
 
-    chronicle reload
-        Reinstall from source, fix symlinks, restart daemon if running.
+    chronicle update
+        Download the latest release binary, verify SHA256, swap it into
+        place, and restart the daemon if it's running.
+    chronicle install-hooks [settings-path]
+        Install chronicle hooks into Claude Code's settings.json. Defaults to
+        ~/.claude/settings.json. Called by install.sh; safe to re-run.
 
     chronicle --version
 """
@@ -93,7 +97,18 @@ def main():
         from .doctor import run as doctor_run
         sys.exit(doctor_run())
     elif command == "reload":
-        reload_install()
+        # Deprecated: the installed artifact is a self-contained binary, there
+        # is no local source tree to reinstall from. Redirect to `update`.
+        print("`chronicle reload` is deprecated in binary builds; use `chronicle update`.",
+              file=sys.stderr)
+        update_install()
+    elif command == "update":
+        update_install()
+    elif command == "install-hooks":
+        from pathlib import Path
+        from .install_hooks import install_hooks
+        default_path = str(Path.home() / ".claude" / "settings.json")
+        install_hooks(sys.argv[1] if len(sys.argv) >= 2 else default_path)
     else:
         print(f"Unknown command: {command}")
         print(__doc__)
@@ -165,104 +180,19 @@ def uninstall_daemon():
     print("      run `chronicle process` to summarize on demand.")
 
 
-def reload_install():
-    """Reinstall from the current source, fix symlinks, and restart the daemon."""
-    import os
-    import signal
+def update_install():
+    """Re-run install.sh to fetch and install the latest release binary.
+
+    install.sh already handles: platform detection, asset download, checksum
+    verification, symlink placement, macOS quarantine cleanup, hook config,
+    and daemon restart (via launchctl kickstart / systemctl restart). Rather
+    than duplicate all of that here, we pipe it back through bash — one
+    source of truth for install and update.
+    """
     import subprocess
-    from pathlib import Path
-
-    from .daemon import _is_running
-
-    src_dir = Path(__file__).resolve().parent.parent
-    venv_dir = src_dir / ".venv"
-    bin_dir = Path.home() / ".local" / "bin"
-
-    # Stop running daemon so it picks up new code on restart
-    daemon_was_running = False
-    running, pid = _is_running()
-    if running:
-        os.kill(pid, signal.SIGTERM)
-        daemon_was_running = True
-        print(f"Stopped daemon (pid {pid}) for reload.")
-
-    print(f"Reinstalling from {src_dir}...")
-
-    # Ensure venv exists AND its interpreter still runs. An upgraded system
-    # Python (e.g. 3.14.3 -> 3.14.4) leaves the venv on disk but with a
-    # dangling python3 symlink; exists() alone would miss that.
-    venv_python = venv_dir / "bin" / "python3"
-    venv_alive = False
-    if venv_python.exists():
-        venv_alive = subprocess.run(
-            [str(venv_python), "-c", "pass"],
-            capture_output=True,
-        ).returncode == 0
-    if not venv_alive:
-        if venv_dir.exists():
-            import shutil
-            shutil.rmtree(venv_dir)
-        subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
-
-    # Reinstall
-    pip = venv_dir / "bin" / "pip"
-    result = subprocess.run(
-        [str(pip), "install", "-e", str(src_dir), "--quiet"],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        print(f"pip install failed: {result.stderr}")
-        sys.exit(1)
-
-    # Install self-healing shell wrappers (not symlinks to venv console scripts).
-    # These /bin/sh wrappers probe the venv and auto-rebuild, so they survive a
-    # base-Python upgrade that would otherwise kill every shebang in .venv.
-    import shutil
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    wrapper_src = src_dir / "scripts"
-    wrappers = {
-        "chronicle":      wrapper_src / "wrapper-chronicle.sh",
-        "chronicle-hook": wrapper_src / "wrapper-chronicle-hook.sh",
-    }
-    for cmd, source in wrappers.items():
-        dest = bin_dir / cmd
-        if dest.exists() or dest.is_symlink():
-            dest.unlink()
-        shutil.copyfile(source, dest)
-        dest.chmod(0o755)
-
-    print(f"Wrappers installed:")
-    print(f"  {bin_dir / 'chronicle'}      (self-healing shell wrapper)")
-    print(f"  {bin_dir / 'chronicle-hook'} (self-healing shell wrapper)")
-
-    # Configure hooks
-    from .install_hooks import install_hooks
-    settings_file = Path.home() / ".claude" / "settings.json"
-    install_hooks(str(settings_file))
-
-    # Restart daemon only if we're in background mode. If the user is in
-    # foreground, a stale daemon was running unexpectedly; don't respawn
-    # it — let launchd/systemd decide, or let `chronicle doctor` flag
-    # the drift.
-    if daemon_was_running:
-        from .config import chronicle_dir
-        from .mode import is_background_mode
-        if is_background_mode():
-            log_file = chronicle_dir() / "daemon.log"
-            with open(log_file, "a") as log_fd:
-                subprocess.Popen(
-                    [str(venv_dir / "bin" / "python"), "-m", "chronicle.daemon"],
-                    start_new_session=True,
-                    stdin=subprocess.DEVNULL,
-                    stdout=log_fd,
-                    stderr=log_fd,
-                )
-            print("Restarted daemon with new code.")
-        else:
-            print("Daemon was running but mode=foreground; leaving stopped. "
-                  "Run `chronicle doctor` if you see drift.")
-
-    print("\nReload complete.")
+    url = "https://raw.githubusercontent.com/ehzawad/claudetalktoclaude/main/install.sh"
+    rc = subprocess.call(f"curl -fsSL {url} | bash", shell=True)
+    sys.exit(rc)
 
 
 if __name__ == "__main__":
