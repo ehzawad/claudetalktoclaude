@@ -111,7 +111,7 @@ flowchart LR
     DOC -->|claude binary unresolved| F1["fail:<br/>install Claude Code"]
     DOC -->|config.json unreadable| F2["fail:<br/>repair config"]
 
-    SELF[["daemon loop reads<br/>config each tick"]] -.->|if mode flipped to fg,<br/>idle — do NOT exit<br/>(avoids launchd KeepAlive<br/>restart loop)| DP
+    SELF[["daemon loop reads<br/>config each tick"]] -.->|if mode flipped to fg,<br/>idle — do NOT exit<br/>— avoids launchd KeepAlive<br/>restart loop| DP
 ```
 
 ---
@@ -224,7 +224,7 @@ flowchart TB
     SS_CTX --> RET
     SS_DAEMON --> RET
 
-    ERR["any exception?<br/>trap + log to<br/>~/.chronicle/hook-errors.log"] -.->|never raise<br/>(must not block the session)| RET
+    ERR["any exception?<br/>trap + log to<br/>~/.chronicle/hook-errors.log"] -.->|never raise —<br/>must not block the session| RET
 ```
 
 > The service manager's own respawn (launchd `KeepAlive` / systemd `Restart=on-failure`) is the primary recovery path. `_spawn_daemon` is defense-in-depth for the window between a daemon crash and the service manager noticing.
