@@ -98,6 +98,9 @@ chronicle doctor --json               # machine-readable (CI-friendly)
 chronicle install-daemon              # switch to background mode
 chronicle uninstall-daemon            # switch to foreground mode
 chronicle update                      # fetch + install the latest release, restart daemon if running
+chronicle uninstall                   # remove binary + hooks + daemon; preserve ~/.chronicle data
+chronicle uninstall --purge --yes     # also delete ~/.chronicle (events.jsonl, config, logs)
+chronicle uninstall --dry-run         # print what would be removed without executing
 chronicle --version
 ```
 

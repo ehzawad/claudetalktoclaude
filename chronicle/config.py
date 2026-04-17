@@ -23,7 +23,16 @@ from pathlib import Path
 # ---------- Lazy path helpers (prefer these inside chronicle/) ----------
 
 def chronicle_dir() -> Path:
-    """~/.chronicle/ — Chronicle's own state dir."""
+    """Chronicle's own state dir. Defaults to ~/.chronicle/.
+
+    Honors $CHRONICLE_HOME so `chronicle uninstall` (and other lifecycle
+    commands) resolve to the same location install.sh wrote to when the
+    user overrode the default. Resolved per-call so tests that monkeypatch
+    the env see the change immediately.
+    """
+    env = os.environ.get("CHRONICLE_HOME")
+    if env:
+        return Path(env).expanduser()
     return Path.home() / ".chronicle"
 
 

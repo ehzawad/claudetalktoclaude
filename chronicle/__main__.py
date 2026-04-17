@@ -47,6 +47,13 @@ Usage:
     chronicle update
         Download the latest release binary, verify SHA256, swap it into
         place, and restart the daemon if it's running.
+    chronicle uninstall [--purge] [--yes] [--dry-run]
+        Remove chronicle from this machine. Stops/removes the daemon,
+        strips chronicle-hook entries from ~/.claude/settings.json, and
+        removes ~/.local/bin/chronicle{,-hook} + ~/.chronicle/runtime/.
+        Preserves user data at ~/.chronicle/ (events.jsonl, config.json,
+        .processed/, .failed/). Pass --purge to delete that too (prompts
+        unless --yes). --dry-run shows the plan without executing.
     chronicle install-hooks [settings-path]
         Install chronicle hooks into Claude Code's settings.json. Defaults to
         ~/.claude/settings.json. Called by install.sh; safe to re-run.
@@ -104,6 +111,8 @@ def main():
         update_install()
     elif command == "update":
         update_install()
+    elif command == "uninstall":
+        uninstall_install()
     elif command == "install-hooks":
         from pathlib import Path
         from .install_hooks import install_hooks
@@ -193,6 +202,221 @@ def update_install():
     url = "https://raw.githubusercontent.com/ehzawad/claudetalktoclaude/main/install.sh"
     rc = subprocess.call(f"curl -fsSL {url} | bash", shell=True)
     sys.exit(rc)
+
+
+def uninstall_install():
+    """Remove chronicle from this machine.
+
+    Default: stop daemon, remove service file, strip chronicle-hook entries
+    from ~/.claude/settings.json, remove ~/.local/bin/chronicle{,-hook}
+    symlinks and ~/.chronicle/runtime/. Preserves user data.
+
+    --purge: additionally rm -rf ~/.chronicle (events.jsonl, config, logs,
+    processed/, failed/). Prompts for confirmation unless --yes.
+
+    IMPORTANT: we import every chronicle.* dependency up-front. After we
+    delete ~/.chronicle/runtime/, the PyInstaller --onedir bootstrap can no
+    longer late-load modules — subsequent imports would crash the process
+    mid-uninstall. Resolve everything while the runtime is still live.
+    """
+    import argparse
+    import os
+    import shutil as _shutil
+
+    from pathlib import Path
+
+    from . import service as _service
+    from .config import chronicle_dir
+    from .install_hooks import uninstall_hooks
+    from .mode import set_processing_mode
+
+    parser = argparse.ArgumentParser(
+        prog="chronicle uninstall",
+        description="Remove chronicle from this machine.",
+    )
+    parser.add_argument("--purge", action="store_true",
+                        help="Also delete ~/.chronicle/ (events.jsonl, config, logs).")
+    parser.add_argument("--yes", "-y", action="store_true",
+                        help="Skip the --purge confirmation prompt.")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print what would be removed, don't remove anything.")
+    args = parser.parse_args()
+
+    home_dir = chronicle_dir()
+    runtime_dir = home_dir / "runtime"
+    legacy_src_dir = home_dir / "src"
+    bin_dir = Path.home() / ".local" / "bin"
+    settings_file = Path.home() / ".claude" / "settings.json"
+
+    def _symlink_is_chronicle_owned(link: Path) -> bool:
+        if not link.is_symlink():
+            return False
+        try:
+            target = os.readlink(str(link))
+        except OSError:
+            return False
+        if os.path.isabs(target):
+            probe = Path(target)
+        else:
+            probe = (link.parent / target)
+        try:
+            probe_resolved = probe.resolve(strict=False)
+        except (OSError, RuntimeError):
+            return False
+        runtime_resolved = runtime_dir.resolve(strict=False) if runtime_dir.exists() \
+                           else runtime_dir
+        try:
+            probe_resolved.relative_to(runtime_resolved)
+            return True
+        except ValueError:
+            return False
+
+    # Build the plan first (so --dry-run can print it and so --purge
+    # confirmation shows the real impact).
+    plan_removed: list[str] = []
+    plan_warn: list[str] = []
+    plan_preserved: list[str] = []
+
+    if _service.service_installed():
+        sfp = _service.service_file_path()
+        plan_removed.append(f"daemon service file: {sfp}")
+
+    hook_entries_to_strip = 0
+    if settings_file.exists():
+        try:
+            hook_entries_to_strip = uninstall_hooks(str(settings_file), dry_run=True)
+        except Exception as e:
+            plan_warn.append(f"could not preview {settings_file}: {e}")
+        if hook_entries_to_strip:
+            plan_removed.append(
+                f"{hook_entries_to_strip} chronicle-hook entries from {settings_file}"
+            )
+
+    symlinks_to_remove: list[Path] = []
+    for name in ("chronicle", "chronicle-hook"):
+        link = bin_dir / name
+        if not (link.exists() or link.is_symlink()):
+            continue
+        if _symlink_is_chronicle_owned(link):
+            symlinks_to_remove.append(link)
+            plan_removed.append(str(link))
+        else:
+            try:
+                tgt = os.readlink(str(link)) if link.is_symlink() else "(regular file)"
+            except OSError:
+                tgt = "?"
+            plan_warn.append(
+                f"{link} is not a chronicle-owned symlink (target: {tgt}); leaving it alone"
+            )
+
+    if runtime_dir.exists():
+        plan_removed.append(f"{runtime_dir}/")
+
+    if legacy_src_dir.exists():
+        plan_removed.append(f"{legacy_src_dir}/ (legacy pre-v0.8.0 source install)")
+
+    if args.purge and home_dir.exists():
+        plan_removed.append(f"{home_dir}/ (--purge: ALL user data)")
+    elif home_dir.exists():
+        for name in ("events.jsonl", "config.json", ".processed", ".failed",
+                     "projects", "daemon.log", "hook-errors.log", "install-errors.log"):
+            p = home_dir / name
+            if p.exists():
+                plan_preserved.append(str(p))
+
+    # Render plan
+    if args.dry_run:
+        print("DRY RUN — chronicle uninstall would do the following:\n")
+        print("Remove:")
+        for item in (plan_removed or ["  (nothing — chronicle isn't installed)"]):
+            print(f"  - {item}")
+        if plan_preserved:
+            print("\nPreserve (use --purge to delete):")
+            for item in plan_preserved:
+                print(f"  - {item}")
+        if plan_warn:
+            print("\nWarnings:")
+            for item in plan_warn:
+                print(f"  ! {item}")
+        return
+
+    if not plan_removed:
+        print("chronicle is not installed on this machine. Nothing to do.")
+        for item in plan_warn:
+            print(f"WARN: {item}", file=sys.stderr)
+        return
+
+    # Confirm --purge
+    if args.purge and not args.yes:
+        print(f"WARNING: --purge will delete ALL chronicle data under {home_dir}.")
+        print("This includes events.jsonl, config.json, processed/failed markers,")
+        print("per-project chronicles, and logs. This cannot be undone.\n")
+        try:
+            answer = input("Type 'yes' to confirm: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        if answer != "yes":
+            print("Aborted.")
+            sys.exit(1)
+
+    # ---------- Execute ----------
+    executed: list[str] = []
+
+    # Flip processing_mode to foreground before removing the service so a
+    # future reinstall on this box (same preserved config) doesn't boot
+    # straight into stale background intent.
+    if not args.purge and (home_dir / "config.json").exists():
+        try:
+            set_processing_mode("foreground")
+        except Exception as e:
+            print(f"WARN: could not reset processing_mode: {e}", file=sys.stderr)
+
+    if _service.service_installed():
+        try:
+            _service.uninstall_service()
+            executed.append("daemon service removed")
+        except Exception as e:
+            print(f"WARN: service uninstall failed: {e}", file=sys.stderr)
+
+    if hook_entries_to_strip and settings_file.exists():
+        try:
+            removed = uninstall_hooks(str(settings_file), dry_run=False)
+            executed.append(f"{removed} chronicle-hook entries removed from {settings_file}")
+        except Exception as e:
+            print(f"WARN: could not edit {settings_file}: {e}", file=sys.stderr)
+
+    for link in symlinks_to_remove:
+        try:
+            link.unlink()
+            executed.append(f"{link} removed")
+        except OSError as e:
+            print(f"WARN: could not remove {link}: {e}", file=sys.stderr)
+
+    if legacy_src_dir.exists():
+        _shutil.rmtree(legacy_src_dir, ignore_errors=True)
+        executed.append(f"{legacy_src_dir}/ removed")
+
+    # Runtime removal is the LAST step before purge. Every chronicle.*
+    # module we might still need has already been imported above; do not
+    # call into chronicle.anything after this point.
+    if runtime_dir.exists():
+        _shutil.rmtree(runtime_dir, ignore_errors=True)
+        executed.append(f"{runtime_dir}/ removed")
+
+    if args.purge and home_dir.exists():
+        _shutil.rmtree(home_dir, ignore_errors=True)
+        executed.append(f"{home_dir}/ purged")
+
+    # ---------- Summary ----------
+    print("Uninstalled:")
+    for item in executed:
+        print(f"  - {item}")
+
+    if not args.purge and home_dir.exists():
+        print(f"\nPreserved user data at {home_dir}")
+        print(f"To delete it later:  rm -rf {home_dir}")
+
+    print("\nchronicle has been removed. Restart Claude Code so the stripped hooks take effect.")
 
 
 if __name__ == "__main__":
