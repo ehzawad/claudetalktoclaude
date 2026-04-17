@@ -188,8 +188,20 @@ def reload_install():
 
     print(f"Reinstalling from {src_dir}...")
 
-    # Ensure venv exists
-    if not venv_dir.exists():
+    # Ensure venv exists AND its interpreter still runs. An upgraded system
+    # Python (e.g. 3.14.3 -> 3.14.4) leaves the venv on disk but with a
+    # dangling python3 symlink; exists() alone would miss that.
+    venv_python = venv_dir / "bin" / "python3"
+    venv_alive = False
+    if venv_python.exists():
+        venv_alive = subprocess.run(
+            [str(venv_python), "-c", "pass"],
+            capture_output=True,
+        ).returncode == 0
+    if not venv_alive:
+        if venv_dir.exists():
+            import shutil
+            shutil.rmtree(venv_dir)
         subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
 
     # Reinstall
@@ -202,18 +214,26 @@ def reload_install():
         print(f"pip install failed: {result.stderr}")
         sys.exit(1)
 
-    # Fix symlinks
+    # Install self-healing shell wrappers (not symlinks to venv console scripts).
+    # These /bin/sh wrappers probe the venv and auto-rebuild, so they survive a
+    # base-Python upgrade that would otherwise kill every shebang in .venv.
+    import shutil
     bin_dir.mkdir(parents=True, exist_ok=True)
-    for cmd in ("chronicle", "chronicle-hook"):
-        link = bin_dir / cmd
-        target = venv_dir / "bin" / cmd
-        if link.exists() or link.is_symlink():
-            link.unlink()
-        link.symlink_to(target)
+    wrapper_src = src_dir / "scripts"
+    wrappers = {
+        "chronicle":      wrapper_src / "wrapper-chronicle.sh",
+        "chronicle-hook": wrapper_src / "wrapper-chronicle-hook.sh",
+    }
+    for cmd, source in wrappers.items():
+        dest = bin_dir / cmd
+        if dest.exists() or dest.is_symlink():
+            dest.unlink()
+        shutil.copyfile(source, dest)
+        dest.chmod(0o755)
 
-    print(f"Symlinks updated:")
-    print(f"  {bin_dir / 'chronicle'} -> {venv_dir / 'bin' / 'chronicle'}")
-    print(f"  {bin_dir / 'chronicle-hook'} -> {venv_dir / 'bin' / 'chronicle-hook'}")
+    print(f"Wrappers installed:")
+    print(f"  {bin_dir / 'chronicle'}      (self-healing shell wrapper)")
+    print(f"  {bin_dir / 'chronicle-hook'} (self-healing shell wrapper)")
 
     # Configure hooks
     from .install_hooks import install_hooks

@@ -112,10 +112,22 @@ fi
 cd "$INSTALL_DIR"
 
 # 4. Venv + install
-if [ -d "$INSTALL_DIR/.venv" ] && [ -x "$INSTALL_DIR/.venv/bin/pip" ]; then
+# -x is not enough: a venv whose system Python was upgraded (e.g. 3.14.3 -> 3.14.4)
+# keeps the exec bit on pip/python but the interpreter symlink is dangling.
+# Actually run the interpreter to tell a live venv from a broken one.
+VENV_OK=0
+if [ -d "$INSTALL_DIR/.venv" ] && "$INSTALL_DIR/.venv/bin/python3" -c "pass" >/dev/null 2>&1; then
+    VENV_OK=1
+fi
+if [ "$VENV_OK" = "1" ]; then
     echo "Reusing existing Python environment..."
 else
-    echo "Creating Python environment..."
+    if [ -d "$INSTALL_DIR/.venv" ]; then
+        echo "Existing venv interpreter is dead (system Python likely upgraded) — rebuilding..."
+        rm -rf "$INSTALL_DIR/.venv"
+    else
+        echo "Creating Python environment..."
+    fi
     "$PYTHON" -m venv .venv 2>/dev/null || {
         echo "ERROR: python3-venv not installed."
         if [ "$OS" = "Darwin" ]; then
@@ -128,10 +140,16 @@ else
 fi
 .venv/bin/pip install -e . --quiet
 
-# 5. Symlink to PATH
+# 5. Install self-healing shell wrappers to PATH.
+# These are /bin/sh scripts (not symlinks to the venv console scripts) so they
+# survive a base-Python upgrade that invalidates the venv interpreter. They
+# probe the venv at run time and auto-rebuild before exec'ing.
 mkdir -p "$HOME/.local/bin"
-ln -sf "$INSTALL_DIR/.venv/bin/chronicle-hook" "$HOME/.local/bin/chronicle-hook"
-ln -sf "$INSTALL_DIR/.venv/bin/chronicle" "$HOME/.local/bin/chronicle"
+# Remove any pre-existing symlinks left over from older installs.
+rm -f "$HOME/.local/bin/chronicle-hook" "$HOME/.local/bin/chronicle"
+cp "$INSTALL_DIR/scripts/wrapper-chronicle-hook.sh" "$HOME/.local/bin/chronicle-hook"
+cp "$INSTALL_DIR/scripts/wrapper-chronicle.sh"      "$HOME/.local/bin/chronicle"
+chmod +x "$HOME/.local/bin/chronicle-hook" "$HOME/.local/bin/chronicle"
 
 # 6. Check PATH
 if ! echo "$PATH" | grep -qF "$HOME/.local/bin"; then
