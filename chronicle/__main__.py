@@ -271,15 +271,16 @@ def uninstall_install():
         except ValueError:
             return False
 
-    # Build the plan first (so --dry-run can print it and so --purge
-    # confirmation shows the real impact).
-    plan_removed: list[str] = []
+    # Build two separate plans so the output can say "Uninstalled" vs "Purged"
+    # correctly instead of muddling everything into one list.
+    plan_integration: list[str] = []   # service, hooks, symlinks, runtime, legacy src
+    plan_data: list[str] = []          # home_dir purge (only with --purge)
+    plan_preserved: list[str] = []     # shown only when integration exists and NOT purging
     plan_warn: list[str] = []
-    plan_preserved: list[str] = []
 
     if _service.service_installed():
         sfp = _service.service_file_path()
-        plan_removed.append(f"daemon service file: {sfp}")
+        plan_integration.append(f"daemon service file: {sfp}")
 
     hook_entries_to_strip = 0
     if settings_file.exists():
@@ -288,7 +289,7 @@ def uninstall_install():
         except Exception as e:
             plan_warn.append(f"could not preview {settings_file}: {e}")
         if hook_entries_to_strip:
-            plan_removed.append(
+            plan_integration.append(
                 f"{hook_entries_to_strip} chronicle-hook entries from {settings_file}"
             )
 
@@ -299,7 +300,7 @@ def uninstall_install():
             continue
         if _symlink_is_chronicle_owned(link):
             symlinks_to_remove.append(link)
-            plan_removed.append(str(link))
+            plan_integration.append(str(link))
         else:
             try:
                 tgt = os.readlink(str(link)) if link.is_symlink() else "(regular file)"
@@ -310,26 +311,42 @@ def uninstall_install():
             )
 
     if runtime_dir.exists():
-        plan_removed.append(f"{runtime_dir}/")
+        plan_integration.append(f"{runtime_dir}/")
 
     if legacy_src_dir.exists():
-        plan_removed.append(f"{legacy_src_dir}/ (legacy pre-v0.8.0 source install)")
+        plan_integration.append(f"{legacy_src_dir}/ (legacy pre-v0.8.0 source install)")
 
     if args.purge and home_dir.exists():
-        plan_removed.append(f"{home_dir}/ (--purge: ALL user data)")
-    elif home_dir.exists():
+        plan_data.append(f"{home_dir}/ (events.jsonl, config, logs, markers)")
+    elif plan_integration and home_dir.exists():
+        # Only meaningful to show "preserved" if we're actually uninstalling
+        # something. If there's nothing to uninstall, preservation is noise.
         for name in ("events.jsonl", "config.json", ".processed", ".failed",
                      "projects", "daemon.log", "hook-errors.log", "install-errors.log"):
             p = home_dir / name
             if p.exists():
                 plan_preserved.append(str(p))
 
-    # Render plan
+    nothing_to_do = not plan_integration and not plan_data
+
+    # ---------- Dry-run render ----------
     if args.dry_run:
+        if nothing_to_do:
+            print("chronicle is not installed on this machine. Nothing to do.")
+            for item in plan_warn:
+                print(f"  ! {item}")
+            return
         print("DRY RUN — chronicle uninstall would do the following:\n")
-        print("Remove:")
-        for item in (plan_removed or ["  (nothing — chronicle isn't installed)"]):
-            print(f"  - {item}")
+        if plan_integration:
+            print("Remove integration:")
+            for item in plan_integration:
+                print(f"  - {item}")
+        if plan_data:
+            if plan_integration:
+                print()
+            print("Purge data (--purge):")
+            for item in plan_data:
+                print(f"  - {item}")
         if plan_preserved:
             print("\nPreserve (use --purge to delete):")
             for item in plan_preserved:
@@ -340,14 +357,15 @@ def uninstall_install():
                 print(f"  ! {item}")
         return
 
-    if not plan_removed:
+    # ---------- Execution mode ----------
+    if nothing_to_do:
         print("chronicle is not installed on this machine. Nothing to do.")
         for item in plan_warn:
             print(f"WARN: {item}", file=sys.stderr)
         return
 
-    # Confirm --purge
-    if args.purge and not args.yes:
+    # Confirm --purge (only if there's actual data to delete)
+    if plan_data and not args.yes:
         print(f"WARNING: --purge will delete ALL chronicle data under {home_dir}.")
         print("This includes events.jsonl, config.json, processed/failed markers,")
         print("per-project chronicles, and logs. This cannot be undone.\n")
@@ -359,12 +377,14 @@ def uninstall_install():
             print("Aborted.")
             sys.exit(1)
 
-    # ---------- Execute ----------
-    executed: list[str] = []
+    # Track execution separately so the summary can report them under
+    # distinct headers ("Uninstalled:" vs "Purged data:").
+    integration_done: list[str] = []
+    data_done: list[str] = []
 
     # Flip processing_mode to foreground before removing the service so a
     # future reinstall on this box (same preserved config) doesn't boot
-    # straight into stale background intent.
+    # straight into stale background intent. Skip if we're purging anyway.
     if not args.purge and (home_dir / "config.json").exists():
         try:
             set_processing_mode("foreground")
@@ -374,49 +394,71 @@ def uninstall_install():
     if _service.service_installed():
         try:
             _service.uninstall_service()
-            executed.append("daemon service removed")
+            integration_done.append("daemon service removed")
         except Exception as e:
             print(f"WARN: service uninstall failed: {e}", file=sys.stderr)
 
     if hook_entries_to_strip and settings_file.exists():
         try:
             removed = uninstall_hooks(str(settings_file), dry_run=False)
-            executed.append(f"{removed} chronicle-hook entries removed from {settings_file}")
+            integration_done.append(f"{removed} chronicle-hook entries removed from {settings_file}")
         except Exception as e:
             print(f"WARN: could not edit {settings_file}: {e}", file=sys.stderr)
 
     for link in symlinks_to_remove:
         try:
             link.unlink()
-            executed.append(f"{link} removed")
+            integration_done.append(f"{link} removed")
         except OSError as e:
             print(f"WARN: could not remove {link}: {e}", file=sys.stderr)
 
     if legacy_src_dir.exists():
         _shutil.rmtree(legacy_src_dir, ignore_errors=True)
-        executed.append(f"{legacy_src_dir}/ removed")
+        integration_done.append(f"{legacy_src_dir}/ removed")
 
-    # Runtime removal is the LAST step before purge. Every chronicle.*
-    # module we might still need has already been imported above; do not
-    # call into chronicle.anything after this point.
+    # Runtime removal is the LAST non-purge step. Every chronicle.* module
+    # we might still need has already been imported above; do not call into
+    # chronicle.anything after this point.
     if runtime_dir.exists():
         _shutil.rmtree(runtime_dir, ignore_errors=True)
-        executed.append(f"{runtime_dir}/ removed")
+        integration_done.append(f"{runtime_dir}/ removed")
 
     if args.purge and home_dir.exists():
         _shutil.rmtree(home_dir, ignore_errors=True)
-        executed.append(f"{home_dir}/ purged")
+        data_done.append(f"{home_dir}/ purged")
 
     # ---------- Summary ----------
-    print("Uninstalled:")
-    for item in executed:
-        print(f"  - {item}")
+    if integration_done:
+        print("Uninstalled:")
+        for item in integration_done:
+            print(f"  - {item}")
+    if data_done:
+        if integration_done:
+            print()
+        print("Purged data:")
+        for item in data_done:
+            print(f"  - {item}")
 
-    if not args.purge and home_dir.exists():
+    # "Preserved" footer only makes sense if we actually uninstalled
+    # something. If every integration step failed, saying "Preserved" would
+    # misleadingly suggest clean success.
+    if integration_done and not args.purge and home_dir.exists():
         print(f"\nPreserved user data at {home_dir}")
         print(f"To delete it later:  rm -rf {home_dir}")
 
-    print("\nchronicle has been removed. Restart Claude Code so the stripped hooks take effect.")
+    # Final message branches on what actually happened, not on what was planned.
+    if integration_done and data_done:
+        print("\nchronicle has been removed and all data purged.")
+    elif integration_done:
+        print("\nchronicle has been removed. Restart Claude Code so the stripped hooks take effect.")
+    elif data_done:
+        print("\nLeftover chronicle data purged.")
+    else:
+        # Had a plan but nothing succeeded (all steps raised / rmtree failed).
+        # Don't print a cheerful success — exit nonzero so CI / scripts notice.
+        print("\nERROR: planned uninstall steps did not complete. See WARN messages above.",
+              file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
