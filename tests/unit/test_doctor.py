@@ -33,7 +33,7 @@ def isolated_doctor(tmp_path, monkeypatch):
 _EXPECTED_TOP_KEYS = {
     "schema_version", "ok",
     "version", "chronicle_binary", "mode", "config_path",
-    "claude", "daemon", "service", "locks", "sessions",
+    "integration", "claude", "daemon", "service", "locks", "sessions",
     "markers", "failed_sample", "drift_warnings",
 }
 
@@ -92,5 +92,21 @@ def test_run_exit_code_one_on_drift(isolated_doctor, monkeypatch, capsys):
     _ = capsys.readouterr()
     assert rc_json == 1
     assert rc_text == 1
+
+
+def test_collect_diagnostics_warns_on_runtime_without_symlink(isolated_doctor):
+    from chronicle import doctor
+
+    runtime = isolated_doctor / ".chronicle" / "runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "chronicle").write_text("binary")
+
+    data = doctor.collect_diagnostics()
+    assert any(
+        "runtime binary exists but ~/.local/bin/chronicle is missing" in warning
+        for warning in data["drift_warnings"]
+    )
+    assert data["integration"]["runtime_exists"] is True
+    assert data["integration"]["chronicle_exists"] is False
 
 

@@ -204,3 +204,28 @@ def test_purge_confirmation_only_fires_if_there_is_data_to_purge(fake_home, monk
     assert rc == 0
     assert "Aborted" not in out
     assert "Uninstalled:" in out
+
+
+def test_runtime_rmtree_failure_exits_nonzero_without_false_success(fake_home, monkeypatch, capsys):
+    """A failed runtime removal must not print a cheerful success summary."""
+    import shutil
+
+    runtime_dir = fake_home / ".chronicle" / "runtime"
+    runtime_dir.mkdir(parents=True)
+    (runtime_dir / "chronicle").write_text("binary")
+
+    real_rmtree = shutil.rmtree
+
+    def failing_rmtree(path, *args, **kwargs):
+        if Path(path) == runtime_dir:
+            raise OSError("permission denied")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", failing_rmtree)
+    rc = _run(["uninstall"], monkeypatch)
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "planned uninstall steps did not complete" in captured.err
+    assert f"{runtime_dir}/ removed" not in captured.out
+    assert "chronicle has been removed" not in captured.out
+    assert runtime_dir.exists()

@@ -75,3 +75,71 @@ def test_idempotent_reinstall_doesnt_duplicate_hooks(tmp_path):
         assert chronicle_count == 1, (
             f"{event}: expected 1 chronicle-hook, got {chronicle_count}"
         )
+
+
+def test_reinstall_preserves_unrelated_hooks_in_same_matcher_group(tmp_path):
+    from chronicle.install_hooks import install_hooks
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({
+        "hooks": {
+            "SessionStart": [{
+                "matcher": "",
+                "hooks": [
+                    {"type": "command", "command": "chronicle-hook"},
+                    {"type": "command", "command": "my-custom-logger"},
+                ],
+            }],
+        },
+    }))
+    install_hooks(str(settings))
+    data = json.loads(settings.read_text())
+    hooks = data["hooks"]["SessionStart"]
+    custom_count = sum(
+        1 for g in hooks for h in g.get("hooks", [])
+        if h.get("command") == "my-custom-logger"
+    )
+    chronicle_count = sum(
+        1 for g in hooks for h in g.get("hooks", [])
+        if h.get("command") == "chronicle-hook"
+    )
+    assert custom_count == 1
+    assert chronicle_count == 1
+
+
+def test_reinstall_treats_absolute_path_chronicle_hook_as_existing(tmp_path):
+    from chronicle.install_hooks import install_hooks
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({
+        "hooks": {
+            "Stop": [{
+                "matcher": "",
+                "hooks": [
+                    {"type": "command", "command": "/Users/ehz/.local/bin/chronicle-hook --verbose"},
+                    {"type": "command", "command": "notify-send done"},
+                ],
+            }],
+        },
+    }))
+    install_hooks(str(settings))
+    data = json.loads(settings.read_text())
+    hooks = data["hooks"]["Stop"]
+    notify_count = sum(
+        1 for g in hooks for h in g.get("hooks", [])
+        if h.get("command") == "notify-send done"
+    )
+    chronicle_count = sum(
+        1 for g in hooks for h in g.get("hooks", [])
+        if h.get("command") == "chronicle-hook"
+    )
+    assert notify_count == 1
+    assert chronicle_count == 1
+
+
+def test_invalid_hooks_value_refuses_cleanly(tmp_path, capsys):
+    from chronicle.install_hooks import install_hooks
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"hooks": ["not", "a", "dict"]}))
+    with pytest.raises(SystemExit) as excinfo:
+        install_hooks(str(settings))
+    assert excinfo.value.code == 2
+    assert "invalid hooks structure" in capsys.readouterr().err

@@ -27,9 +27,6 @@ from .config import (
 
 _MAX_ERROR_LOG_BYTES = 1_000_000  # ~1MB cap
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-
-
 def _daemon_running() -> bool:
     """Check if the daemon process is alive via PID file."""
     try:
@@ -63,7 +60,7 @@ def _spawn_daemon():
             stdin=subprocess.DEVNULL,
             stdout=log_fd,
             stderr=log_fd,
-            cwd=str(PROJECT_ROOT),
+            cwd=str(Path.home()),
         )
 
 

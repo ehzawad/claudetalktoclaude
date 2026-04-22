@@ -93,3 +93,32 @@ class TestModeDriftWarnings:
             processing_mode="background", installed=True, running=True,
         )
         assert warnings == []
+
+
+def test_chronicle_binary_raises_when_missing(tmp_home, monkeypatch):
+    import importlib
+    import chronicle.service as service
+
+    monkeypatch.setenv("HOME", str(tmp_home))
+    monkeypatch.setattr(service.shutil, "which", lambda name: None)
+    importlib.reload(service)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        service._chronicle_binary()
+    assert "chronicle binary not found" in str(excinfo.value)
+
+
+def test_install_service_records_bootstrap_error(monkeypatch):
+    import chronicle.service as service
+
+    monkeypatch.setattr(service, "platform_key", lambda: "macos")
+
+    def fake_mac_install():
+        service._LAST_SERVICE_ERROR = "launchctl bootstrap failed: boom"
+        return False
+
+    monkeypatch.setattr(service, "_mac_install", fake_mac_install)
+
+    accepted = service.install_service()
+    assert accepted is False
+    assert service.last_service_error() == "launchctl bootstrap failed: boom"

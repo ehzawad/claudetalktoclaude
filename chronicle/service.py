@@ -33,6 +33,7 @@ from .claude_cli import try_resolve_claude_binary
 
 _MAC_LABEL = "com.chronicle.daemon"
 _LINUX_UNIT = "chronicle-daemon.service"
+_LAST_SERVICE_ERROR: Optional[str] = None
 
 _MAC_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{_MAC_LABEL}.plist"
 _LINUX_UNIT_PATH = Path.home() / ".config" / "systemd" / "user" / _LINUX_UNIT
@@ -56,6 +57,22 @@ def _standard_path() -> str:
     return os.pathsep.join(parts)
 
 
+def _set_last_service_error(message: Optional[str]) -> None:
+    global _LAST_SERVICE_ERROR
+    _LAST_SERVICE_ERROR = message
+
+
+def last_service_error() -> Optional[str]:
+    return _LAST_SERVICE_ERROR
+
+
+def _describe_process_failure(res: subprocess.CompletedProcess, prefix: str) -> str:
+    detail = (res.stderr or res.stdout or "").strip()
+    if detail:
+        return f"{prefix}: {detail}"
+    return f"{prefix} (exit {res.returncode})"
+
+
 def _chronicle_binary() -> str:
     """Absolute path to the chronicle entry point used in launchd / systemd unit files.
 
@@ -65,11 +82,22 @@ def _chronicle_binary() -> str:
     service file, leading to subtle drift.
     """
     if getattr(sys, "frozen", False):
-        return str(Path(sys.executable).resolve())
-    found = shutil.which("chronicle")
-    if found:
-        return found
-    return str(Path.home() / ".local" / "bin" / "chronicle")
+        candidate = Path(sys.executable)
+    else:
+        found = shutil.which("chronicle")
+        candidate = Path(found) if found else Path.home() / ".local" / "bin" / "chronicle"
+
+    try:
+        resolved = candidate.resolve(strict=True)
+    except FileNotFoundError as e:
+        raise RuntimeError(
+            f"chronicle binary not found at {candidate}; rerun install.sh or `chronicle update` first."
+        ) from e
+    if not resolved.is_file():
+        raise RuntimeError(
+            f"chronicle binary path {resolved} is not an executable file."
+        )
+    return str(resolved)
 
 
 # ---------- macOS (launchd) ----------
@@ -123,11 +151,10 @@ def _mac_bootout() -> None:
     _mac_run(["launchctl", "bootout", f"gui/{uid}/{_MAC_LABEL}"])
 
 
-def _mac_bootstrap() -> bool:
-    """Bootstrap the service. Returns True on success."""
+def _mac_bootstrap() -> subprocess.CompletedProcess:
+    """Bootstrap the service."""
     uid = os.getuid()
-    res = _mac_run(["launchctl", "bootstrap", f"gui/{uid}", str(_MAC_PLIST_PATH)])
-    return res.returncode == 0
+    return _mac_run(["launchctl", "bootstrap", f"gui/{uid}", str(_MAC_PLIST_PATH)])
 
 
 def _mac_is_loaded() -> bool:
@@ -140,7 +167,11 @@ def _mac_install() -> bool:
     _MAC_PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
     _MAC_PLIST_PATH.write_text(_mac_plist_contents())
     _mac_bootout()
-    return _mac_bootstrap()
+    res = _mac_bootstrap()
+    if res.returncode != 0:
+        _set_last_service_error(_describe_process_failure(res, "launchctl bootstrap failed"))
+        return False
+    return True
 
 
 def _mac_uninstall() -> None:
@@ -184,9 +215,15 @@ def _linux_install() -> bool:
     """Write unit and `enable --now`. Returns True if systemctl reports success."""
     _LINUX_UNIT_PATH.parent.mkdir(parents=True, exist_ok=True)
     _LINUX_UNIT_PATH.write_text(_linux_unit_contents())
-    _linux_run(["systemctl", "--user", "daemon-reload"])
+    reload_res = _linux_run(["systemctl", "--user", "daemon-reload"])
+    if reload_res.returncode != 0:
+        _set_last_service_error(_describe_process_failure(reload_res, "systemctl daemon-reload failed"))
+        return False
     res = _linux_run(["systemctl", "--user", "enable", "--now", _LINUX_UNIT])
-    return res.returncode == 0
+    if res.returncode != 0:
+        _set_last_service_error(_describe_process_failure(res, "systemctl enable --now failed"))
+        return False
+    return True
 
 
 def _linux_uninstall() -> None:
@@ -213,6 +250,7 @@ def install_service() -> bool:
     the file was written but bootstrap/enable failed — caller should
     surface this to the user via `chronicle doctor`.
     """
+    _set_last_service_error(None)
     p = platform_key()
     if p == "macos":
         return _mac_install()

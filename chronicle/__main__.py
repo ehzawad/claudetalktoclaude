@@ -68,6 +68,15 @@ Usage:
 import sys
 
 
+def _installer_url() -> str:
+    return "https://raw.githubusercontent.com/ehzawad/claudetalktoclaude/main/install.sh"
+
+
+def _run_remote_install_script(url: str) -> int:
+    import subprocess
+    return subprocess.call(["/bin/bash", "-lc", f"curl -fsSL {url} | bash"])
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -153,6 +162,9 @@ def install_daemon():
     else:
         print("Service file written, but the service manager did NOT start the daemon cleanly.",
               file=sys.stderr)
+        detail = service.last_service_error()
+        if detail:
+            print(f"Details: {detail}", file=sys.stderr)
         print("processing_mode=background is set; run `chronicle doctor` for details.",
               file=sys.stderr)
     print()
@@ -202,9 +214,7 @@ def update_install():
     than duplicate all of that here, we pipe it back through bash — one
     source of truth for install and update.
     """
-    import subprocess
-    url = "https://raw.githubusercontent.com/ehzawad/claudetalktoclaude/main/install.sh"
-    rc = subprocess.call(f"curl -fsSL {url} | bash", shell=True)
+    rc = _run_remote_install_script(_installer_url())
     sys.exit(rc)
 
 
@@ -333,6 +343,17 @@ def uninstall_install():
 
     nothing_to_do = not plan_integration and not plan_data
 
+    def _rmtree_checked(target: Path, label: str, bucket: list[str]) -> None:
+        try:
+            _shutil.rmtree(target)
+        except OSError as e:
+            print(f"WARN: could not remove {target}: {e}", file=sys.stderr)
+            return
+        if target.exists():
+            print(f"WARN: attempted to remove {target}, but it still exists.", file=sys.stderr)
+            return
+        bucket.append(label)
+
     # ---------- Dry-run render ----------
     if args.dry_run:
         if nothing_to_do:
@@ -405,31 +426,40 @@ def uninstall_install():
     if hook_entries_to_strip and settings_file.exists():
         try:
             removed = uninstall_hooks(str(settings_file), dry_run=False)
-            integration_done.append(f"{removed} chronicle-hook entries removed from {settings_file}")
+            if removed:
+                integration_done.append(
+                    f"{removed} chronicle-hook entries removed from {settings_file}"
+                )
+            else:
+                print(
+                    f"WARN: expected chronicle-hook entries in {settings_file}, "
+                    "but none were removed.",
+                    file=sys.stderr,
+                )
         except Exception as e:
             print(f"WARN: could not edit {settings_file}: {e}", file=sys.stderr)
 
     for link in symlinks_to_remove:
         try:
             link.unlink()
-            integration_done.append(f"{link} removed")
+            if link.exists() or link.is_symlink():
+                print(f"WARN: attempted to remove {link}, but it still exists.", file=sys.stderr)
+            else:
+                integration_done.append(f"{link} removed")
         except OSError as e:
             print(f"WARN: could not remove {link}: {e}", file=sys.stderr)
 
     if legacy_src_dir.exists():
-        _shutil.rmtree(legacy_src_dir, ignore_errors=True)
-        integration_done.append(f"{legacy_src_dir}/ removed")
+        _rmtree_checked(legacy_src_dir, f"{legacy_src_dir}/ removed", integration_done)
 
     # Runtime removal is the LAST non-purge step. Every chronicle.* module
     # we might still need has already been imported above; do not call into
     # chronicle.anything after this point.
     if runtime_dir.exists():
-        _shutil.rmtree(runtime_dir, ignore_errors=True)
-        integration_done.append(f"{runtime_dir}/ removed")
+        _rmtree_checked(runtime_dir, f"{runtime_dir}/ removed", integration_done)
 
     if args.purge and home_dir.exists():
-        _shutil.rmtree(home_dir, ignore_errors=True)
-        data_done.append(f"{home_dir}/ purged")
+        _rmtree_checked(home_dir, f"{home_dir}/ purged", data_done)
 
     # ---------- Summary ----------
     if integration_done:

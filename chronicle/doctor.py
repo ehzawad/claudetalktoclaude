@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import sys
+from pathlib import Path
 from typing import Any, Sequence
 
 from . import service
@@ -22,6 +23,7 @@ from .config import (
     chronicle_dir, claude_projects, config_file,
     processed_dir, processing_lock_path,
 )
+from .install_hooks import _is_chronicle_hook_command
 from .locks import daemon_is_running, processing_lock_held
 from .mode import get_processing_mode
 from .storage import is_succeeded, is_terminal_failure, list_failed
@@ -47,6 +49,49 @@ def _count_sessions() -> dict:
                 else:
                     pending += 1
     return {"processed_ok": ok, "terminal_failure": term, "unprocessed": pending}
+
+
+def _hook_install_status() -> tuple[int | None, str | None, str]:
+    settings_path = Path.home() / ".claude" / "settings.json"
+    if not settings_path.exists():
+        return 0, None, str(settings_path)
+    try:
+        raw = settings_path.read_text()
+        settings = json.loads(raw) if raw.strip() else {}
+    except (OSError, json.JSONDecodeError) as e:
+        return None, f"could not read {settings_path}: {e}", str(settings_path)
+    if not isinstance(settings, dict):
+        return None, f"{settings_path} top-level JSON is not an object", str(settings_path)
+
+    hooks = settings.get("hooks", {})
+    if hooks is None:
+        return 0, None, str(settings_path)
+    if not isinstance(hooks, dict):
+        return None, f"{settings_path} hooks value is not an object", str(settings_path)
+
+    count = 0
+    for matcher_groups in hooks.values():
+        if not isinstance(matcher_groups, list):
+            continue
+        for matcher_group in matcher_groups:
+            if not isinstance(matcher_group, dict):
+                continue
+            entries = matcher_group.get("hooks", [])
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if isinstance(entry, dict) and _is_chronicle_hook_command(entry.get("command")):
+                    count += 1
+    return count, None, str(settings_path)
+
+
+def _symlink_target(path: Path) -> str | None:
+    if not path.is_symlink():
+        return None
+    try:
+        return os.readlink(path)
+    except OSError:
+        return None
 
 
 def collect_diagnostics() -> dict[str, Any]:
@@ -80,6 +125,38 @@ def collect_diagnostics() -> dict[str, Any]:
     if config_error:
         drift_warnings.insert(0, f"config load error: {config_error}")
 
+    bin_dir = Path.home() / ".local" / "bin"
+    chronicle_path = bin_dir / "chronicle"
+    chronicle_hook_path = bin_dir / "chronicle-hook"
+    runtime_binary = chronicle_dir() / "runtime" / "chronicle"
+    hook_count, hook_warning, settings_path = _hook_install_status()
+    chronicle_on_path = shutil.which("chronicle")
+    hook_on_path = shutil.which("chronicle-hook")
+
+    if runtime_binary.exists() and not (chronicle_path.exists() or chronicle_path.is_symlink()):
+        drift_warnings.append(
+            "runtime binary exists but ~/.local/bin/chronicle is missing — rerun install.sh to restore the symlink."
+        )
+    elif chronicle_path.is_symlink() and not chronicle_path.exists():
+        drift_warnings.append(
+            "~/.local/bin/chronicle is a broken symlink — rerun install.sh to repair it."
+        )
+
+    if (chronicle_path.exists() or chronicle_path.is_symlink()) and not chronicle_on_path:
+        drift_warnings.append(
+            "~/.local/bin/chronicle exists but `chronicle` is not on PATH for this shell."
+        )
+    if (chronicle_hook_path.exists() or chronicle_hook_path.is_symlink()) and not hook_on_path:
+        drift_warnings.append(
+            "~/.local/bin/chronicle-hook exists but `chronicle-hook` is not on PATH for this shell."
+        )
+    if runtime_binary.exists() and hook_count == 0:
+        drift_warnings.append(
+            f"{settings_path} has no chronicle-hook entries — rerun install.sh or `chronicle install-hooks`."
+        )
+    if hook_warning:
+        drift_warnings.append(hook_warning)
+
     return {
         "schema_version": 1,
         "ok": (
@@ -91,6 +168,21 @@ def collect_diagnostics() -> dict[str, Any]:
         "chronicle_binary": shutil.which("chronicle"),
         "mode": mode,
         "config_path": str(config_file()),
+        "integration": {
+            "chronicle_path": str(chronicle_path),
+            "chronicle_exists": chronicle_path.exists() or chronicle_path.is_symlink(),
+            "chronicle_target": _symlink_target(chronicle_path),
+            "chronicle_resolved": chronicle_on_path,
+            "chronicle_hook_path": str(chronicle_hook_path),
+            "chronicle_hook_exists": chronicle_hook_path.exists() or chronicle_hook_path.is_symlink(),
+            "chronicle_hook_target": _symlink_target(chronicle_hook_path),
+            "chronicle_hook_resolved": hook_on_path,
+            "runtime_binary": str(runtime_binary),
+            "runtime_exists": runtime_binary.exists(),
+            "settings_path": settings_path,
+            "hook_entries": hook_count,
+            "hook_warning": hook_warning,
+        },
         "claude": {
             "resolved": str(claude_bin) if claude_bin else None,
             "path_env": os.environ.get("PATH", ""),
@@ -153,6 +245,23 @@ def print_human(data: dict[str, Any]) -> None:
         print("resolved:    NOT FOUND — chronicle cannot summarize",
               file=sys.stderr)
     print(f"PATH:        {data['claude']['path_env']}")
+
+    _section("chronicle integration")
+    integ = data["integration"]
+    print(f"chronicle:   {integ['chronicle_resolved'] or '(not on PATH)'}")
+    print(f"hook:        {integ['chronicle_hook_resolved'] or '(not on PATH)'}")
+    print(f"runtime:     {integ['runtime_binary']} "
+          f"({'present' if integ['runtime_exists'] else 'missing'})")
+    print(f"settings:    {integ['settings_path']}")
+    hook_entries = integ["hook_entries"]
+    if hook_entries is None:
+        print(f"hook entries: unreadable ({integ['hook_warning']})")
+    else:
+        print(f"hook entries: {hook_entries}")
+    if integ["chronicle_target"]:
+        print(f"chronicle symlink: {integ['chronicle_target']}")
+    if integ["chronicle_hook_target"]:
+        print(f"hook symlink: {integ['chronicle_hook_target']}")
 
     _section("daemon")
     d = data["daemon"]

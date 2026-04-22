@@ -127,10 +127,15 @@ DAEMON_WAS_RUNNING=0
 if [ -f "$CHRONICLE_HOME/daemon.pid" ]; then
     DAEMON_PID=$(cat "$CHRONICLE_HOME/daemon.pid" 2>/dev/null || echo "")
     if [ -n "$DAEMON_PID" ] && kill -0 "$DAEMON_PID" 2>/dev/null; then
-        DAEMON_WAS_RUNNING=1
-        kill -TERM "$DAEMON_PID" 2>/dev/null || true
-        # Give launchd/systemd a moment to notice before we overwrite files.
-        sleep 1
+        DAEMON_CMD="$(ps -p "$DAEMON_PID" -o command= 2>/dev/null || true)"
+        if echo "$DAEMON_CMD" | grep -q "chronicle"; then
+            DAEMON_WAS_RUNNING=1
+            kill -TERM "$DAEMON_PID" 2>/dev/null || true
+            # Give launchd/systemd a moment to notice before we overwrite files.
+            sleep 1
+        else
+            echo "Ignoring stale daemon.pid ($DAEMON_PID does not look like chronicle)."
+        fi
     fi
 fi
 
@@ -141,19 +146,31 @@ if [ -d "$CHRONICLE_HOME/src" ]; then
     echo "Removing legacy source-tree install at $CHRONICLE_HOME/src..."
     rm -rf "$CHRONICLE_HOME/src"
 fi
-# Old symlinks / wrapper scripts from earlier layouts.
-rm -f "$BIN_DIR/chronicle" "$BIN_DIR/chronicle-hook"
 
 # -----------------------------------------------------------------------------
-# 6. Install runtime + symlinks
+# 6. Validate the new runtime before swapping it live
 # -----------------------------------------------------------------------------
 mkdir -p "$BIN_DIR" "$CHRONICLE_HOME"
-# Atomic swap: extract side-by-side, then rename. Prevents half-written runtime
-# dir from being live if something crashes mid-install.
 NEW_RUNTIME="$CHRONICLE_HOME/runtime.new"
 rm -rf "$NEW_RUNTIME"
 mv "chronicle-$TARGET" "$NEW_RUNTIME"
 
+# macOS: strip quarantine. curl-downloaded files rarely carry quarantine, but
+# tar can import it from individual entries, and some corporate MDM policies
+# attach it. Clearing it here avoids Gatekeeper killing every binary launch.
+if [ "$OS" = "Darwin" ]; then
+    xattr -dr com.apple.quarantine "$NEW_RUNTIME" 2>/dev/null || true
+fi
+
+echo "Validating hook installation..."
+mkdir -p "$HOME/.claude"
+"$NEW_RUNTIME/chronicle" install-hooks "$SETTINGS_FILE"
+
+# -----------------------------------------------------------------------------
+# 7. Install runtime + symlinks
+# -----------------------------------------------------------------------------
+# Atomic swap: validate first, then rename. Prevents half-written runtime
+# dir from being live if hook installation fails.
 if [ -d "$RUNTIME_DIR" ]; then
     OLD_RUNTIME="$CHRONICLE_HOME/runtime.old"
     rm -rf "$OLD_RUNTIME"
@@ -162,19 +179,14 @@ fi
 mv "$NEW_RUNTIME" "$RUNTIME_DIR"
 rm -rf "$CHRONICLE_HOME/runtime.old"
 
-# macOS: strip quarantine. curl-downloaded files rarely carry quarantine, but
-# tar can import it from individual entries, and some corporate MDM policies
-# attach it. Clearing it here avoids Gatekeeper killing every binary launch.
-if [ "$OS" = "Darwin" ]; then
-    xattr -dr com.apple.quarantine "$RUNTIME_DIR" 2>/dev/null || true
-fi
-
+# Old symlinks / wrapper scripts from earlier layouts.
+rm -f "$BIN_DIR/chronicle" "$BIN_DIR/chronicle-hook"
 # Relative symlinks so the install layout stays portable if $HOME moves.
 ln -sf "$RUNTIME_DIR/chronicle" "$BIN_DIR/chronicle"
 ln -sf "chronicle" "$BIN_DIR/chronicle-hook"
 
 # -----------------------------------------------------------------------------
-# 7. PATH check
+# 8. PATH check
 # -----------------------------------------------------------------------------
 if ! echo ":$PATH:" | grep -qF ":$BIN_DIR:"; then
     SHELL_RC=""
@@ -191,13 +203,6 @@ if ! echo ":$PATH:" | grep -qF ":$BIN_DIR:"; then
     fi
     export PATH="$BIN_DIR:$PATH"
 fi
-
-# -----------------------------------------------------------------------------
-# 8. Configure hooks (via the binary we just installed)
-# -----------------------------------------------------------------------------
-echo "Configuring Claude Code hooks..."
-mkdir -p "$HOME/.claude"
-"$BIN_DIR/chronicle" install-hooks "$SETTINGS_FILE"
 
 # -----------------------------------------------------------------------------
 # 9. Tighten data dir perms + restart daemon if needed

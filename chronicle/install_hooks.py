@@ -44,12 +44,13 @@ CHRONICLE_HOOKS = {
 }
 
 
-def _has_chronicle_hook(matcher_group: dict) -> bool:
-    """Check if a matcher group contains a chronicle-hook command."""
-    for hook in matcher_group.get("hooks", []):
-        if hook.get("command") == "chronicle-hook":
-            return True
-    return False
+def _invalid_hooks_error(path: Path, detail: str) -> None:
+    print(
+        f"ERROR: {path} has an invalid hooks structure ({detail}). "
+        "Chronicle will not overwrite it. Fix the file and retry.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 
 def install_hooks(settings_path: str):
@@ -81,16 +82,44 @@ def install_hooks(settings_path: str):
         sys.exit(2)
 
     hooks = settings.get("hooks", {})
+    if hooks is None:
+        hooks = {}
+    if not isinstance(hooks, dict):
+        _invalid_hooks_error(path, "'hooks' must be an object")
 
     # Merge Chronicle hooks into existing hooks without replacing user entries.
-    # For each event, append Chronicle's matcher group to the existing list
-    # (if not already present), preserving any user-defined hooks.
+    # For each event, remove only the Chronicle hook entries from existing
+    # matcher groups, preserve unrelated user hooks, then append Chronicle's
+    # canonical matcher group.
     for event_name, chronicle_matchers in CHRONICLE_HOOKS.items():
         existing = hooks.get(event_name, [])
-        # Remove any existing chronicle-hook entries (for idempotent reinstall)
-        existing = [mg for mg in existing if not _has_chronicle_hook(mg)]
-        # Append Chronicle's matcher groups
-        hooks[event_name] = existing + chronicle_matchers
+        if existing is None:
+            existing = []
+        if not isinstance(existing, list):
+            _invalid_hooks_error(path, f"hooks[{event_name!r}] must be a list")
+
+        cleaned_groups = []
+        for mg in existing:
+            if not isinstance(mg, dict):
+                _invalid_hooks_error(path, f"hooks[{event_name!r}] must contain objects")
+            entries = mg.get("hooks")
+            if entries is None:
+                _invalid_hooks_error(path, f"hooks[{event_name!r}] matcher groups need a 'hooks' list")
+            if not isinstance(entries, list):
+                _invalid_hooks_error(path, f"hooks[{event_name!r}][].hooks must be a list")
+
+            kept_entries = []
+            for entry in entries:
+                if isinstance(entry, dict) and _is_chronicle_hook_command(entry.get("command")):
+                    continue
+                kept_entries.append(entry)
+
+            if kept_entries:
+                new_group = dict(mg)
+                new_group["hooks"] = kept_entries
+                cleaned_groups.append(new_group)
+
+        hooks[event_name] = cleaned_groups + chronicle_matchers
 
     settings["hooks"] = hooks
 
