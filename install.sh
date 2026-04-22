@@ -209,7 +209,7 @@ fi
 # -----------------------------------------------------------------------------
 chmod 700 "$CHRONICLE_HOME" 2>/dev/null || true
 
-EFFECTIVE_MODE=$("$BIN_DIR/chronicle" doctor 2>/dev/null | awk '/^mode:/ {print $2}')
+EFFECTIVE_MODE=$("$BIN_DIR/chronicle" doctor 2>/dev/null | awk '/^mode:/ {print $2}' || true)
 [ -z "$EFFECTIVE_MODE" ] && EFFECTIVE_MODE="foreground"
 
 if [ "$EFFECTIVE_MODE" = "background" ]; then
