@@ -33,6 +33,8 @@ Usage:
         Diagnose: mode, resolved claude binary, daemon/service status,
         drift warnings, counts. --json emits a schema-versioned document
         (top-level `ok: bool`, `schema_version: 1`) for CI health checks.
+        If the runtime binary exists but your shell cannot find `chronicle`,
+        verify `~/.local/bin/chronicle` still points at `~/.chronicle/runtime/chronicle`.
 
     chronicle install-daemon
         Switch to background mode: install & start launchd/systemd service.
@@ -46,7 +48,9 @@ Usage:
 
     chronicle update
         Download the latest release binary, verify SHA256, swap it into
-        place, and restart the daemon if it's running.
+        place, and restart the daemon if it's running. If `chronicle`
+        itself no longer resolves in your shell, rerun `install.sh`
+        instead so the `~/.local/bin/chronicle` symlink is recreated.
     chronicle uninstall [--purge] [--yes] [--dry-run]
         Remove chronicle from this machine. Stops/removes the daemon,
         strips chronicle-hook entries from ~/.claude/settings.json, and

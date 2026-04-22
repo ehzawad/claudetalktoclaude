@@ -30,6 +30,19 @@ chronicle query projects            # show per-project session counts
 chronicle process --workers 5       # summarize pending sessions (foreground)
 ```
 
+If your shell still says `chronicle: command not found` after install, verify
+the symlink before assuming a shell or macOS problem:
+
+```bash
+command -v chronicle
+ls -l ~/.local/bin/chronicle ~/.chronicle/runtime/chronicle
+```
+
+If `~/.chronicle/runtime/chronicle` exists but `~/.local/bin/chronicle` does
+not, rerun `install.sh` to restore the symlink. A separate tool such as
+`codex-chronicle` does not replace or shadow the `chronicle` command; they
+coexist under different names.
+
 Switch modes anytime:
 
 ```bash
@@ -468,6 +481,8 @@ Run `chronicle doctor` first. It reports:
 Common fixes:
 
 - **`claude` not found.** Install the Claude Code CLI, or ensure it's on the daemon's PATH. `chronicle install-daemon` bakes PATH into the launchd plist / systemd unit so minimal service-manager envs (`/usr/bin:/bin:/usr/sbin:/sbin`) don't cause `FileNotFoundError`.
+- **`chronicle` not found, but runtime exists.** Check `ls -l ~/.local/bin/chronicle ~/.chronicle/runtime/chronicle`. If the runtime binary exists but the `~/.local/bin/chronicle` symlink is missing, rerun `install.sh` (or `chronicle update` if the command still resolves anywhere) to restore it.
+- **`codex-chronicle` is installed too.** That is not a name collision. `codex-chronicle` and `chronicle` are separate commands with separate install roots.
 - **Mode drift warning.** Config says one mode but service state says another. `chronicle install-daemon` / `uninstall-daemon` reconciles.
 - **Terminal failures after fixing a config issue.** `chronicle process --retry-failed --workers 5`.
 - **Ubuntu background mode survives logout.** Run once: `sudo loginctl enable-linger "$USER"`.
