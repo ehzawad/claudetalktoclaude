@@ -23,9 +23,9 @@ jobs:
             target: linux-x86_64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.14'
 
@@ -75,7 +75,7 @@ jobs:
             sha256sum chronicle-${{ matrix.target }}.tar.gz > chronicle-${{ matrix.target }}.tar.gz.sha256
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: chronicle-${{ matrix.target }}
           path: |
@@ -87,7 +87,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -95,7 +95,7 @@ jobs:
       - name: List assets
         run: ls -la artifacts/
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: |
             artifacts/chronicle-*.tar.gz
