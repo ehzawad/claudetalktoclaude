@@ -218,10 +218,11 @@ async def _process_batch(events: list[tuple[str, dict]], config: dict) -> list[t
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
+    raw = config.get("max_retries")
     try:
-        max_retries = int(config.get("max_retries", 3))
+        max_retries = None if raw is None else int(raw)
     except (TypeError, ValueError):
-        max_retries = 3
+        max_retries = None
     pending_writes = []
     retry = []
     for (sid, ev), result in zip(events, results):
@@ -263,7 +264,8 @@ async def _process_batch(events: list[tuple[str, dict]], config: dict) -> list[t
         except Exception as e:
             print(f"[chronicle] write failed for {sid[:8]}: {e}", file=sys.stderr)
             try:
-                terminal = get_attempt_count(digest.session_id) + 1 >= max_retries
+                terminal = (max_retries is not None
+                            and get_attempt_count(digest.session_id) + 1 >= max_retries)
                 record_failed_attempt(
                     digest.session_id, error_kind="transient",
                     error_message=f"write_chronicle: {e}", terminal=terminal,

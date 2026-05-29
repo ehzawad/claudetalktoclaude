@@ -140,3 +140,36 @@ class TestWriteChronicleRetryAccounting:
         storage.write_chronicle(entry, digest, max_retries=3)
         assert storage.get_attempt_count(digest.session_id) == 3
         assert storage.is_terminal_failure(digest.session_id)
+
+    def test_context_error_is_terminal_immediately(self, isolated_chronicle):
+        # A prompt too large for the model is deterministic — retrying the
+        # identical prompt can't help, so it goes terminal on the FIRST attempt
+        # (never burns the retry budget) even with unlimited max_retries.
+        from chronicle import storage
+        digest = self._make_digest()
+        entry = self._make_entry(is_error=True, error_kind="context",
+                                 error_message="prompt is too long")
+        storage.write_chronicle(entry, digest, max_retries=None)
+        assert storage.get_attempt_count(digest.session_id) == 1
+        assert storage.is_terminal_failure(digest.session_id)
+
+    def test_structured_output_error_is_terminal_immediately(self, isolated_chronicle):
+        from chronicle import storage
+        digest = self._make_digest()
+        entry = self._make_entry(is_error=True, error_kind="structured_output",
+                                 error_message="error_max_structured_output_retries")
+        storage.write_chronicle(entry, digest, max_retries=None)
+        assert storage.get_attempt_count(digest.session_id) == 1
+        assert storage.is_terminal_failure(digest.session_id)
+
+    def test_transient_never_terminal_when_max_retries_none(self, isolated_chronicle):
+        # max_retries=None means unlimited retriable attempts: the counter
+        # advances but the session never gives up.
+        from chronicle import storage
+        digest = self._make_digest()
+        entry = self._make_entry(is_error=True, error_kind="transient",
+                                 error_message="overloaded, please retry")
+        for _ in range(5):
+            storage.write_chronicle(entry, digest, max_retries=None)
+        assert storage.get_attempt_count(digest.session_id) == 5
+        assert not storage.is_terminal_failure(digest.session_id)

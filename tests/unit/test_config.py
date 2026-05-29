@@ -13,7 +13,8 @@ def test_missing_config_returns_defaults(chronicle_env):
     from chronicle import config
     cfg = config.load_config()
     assert cfg["processing_mode"] == "foreground"
-    assert cfg["max_retries"] == 3
+    assert cfg["max_retries"] is None      # unlimited retriable attempts by default
+    assert cfg["model"] is None            # use claude's own default model
     assert "_load_error" not in cfg
 
 
@@ -26,8 +27,8 @@ def test_valid_config_merges_over_defaults(chronicle_env):
     cfg = config.load_config()
     assert cfg["max_retries"] == 7
     assert cfg["model"] == "custom"
-    # Unset keys still come from defaults
-    assert cfg["fallback_model"] == "sonnet"
+    # Unset keys still come from defaults (fallback_model defaults to None)
+    assert cfg["fallback_model"] is None
     assert "_load_error" not in cfg
 
 
@@ -37,7 +38,7 @@ def test_malformed_json_returns_defaults_with_error(chronicle_env):
     cfg = config.load_config()
     # Must NOT raise. Must return defaults + _load_error.
     assert cfg["processing_mode"] == "foreground"
-    assert cfg["max_retries"] == 3
+    assert cfg["max_retries"] is None
     assert "_load_error" in cfg
     assert "config.json" in cfg["_load_error"]
 

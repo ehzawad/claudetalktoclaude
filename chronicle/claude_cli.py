@@ -29,7 +29,7 @@ import shutil
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
 
 # Env vars that route away from the Claude.ai subscription.
@@ -68,10 +68,17 @@ def _standard_path_dirs() -> list[Path]:
 
 
 class ErrorKind(Enum):
-    """Classification of subprocess failures."""
-    INFRA = "infra"          # Binary missing, perm denied, auth — don't charge retries
-    TRANSIENT = "transient"  # Timeout, claude's is_error — count against retries
-    PARSE = "parse"          # Output unparseable — count against retries
+    """Classification of subprocess failures.
+
+    INFRA never charges a retry; TRANSIENT/PARSE are retriable; CONTEXT and
+    STRUCTURED_OUTPUT are deterministic for the prompt as sent, so storage
+    marks them terminal immediately rather than re-running the identical call.
+    """
+    INFRA = "infra"                          # binary missing / perm denied / auth
+    TRANSIENT = "transient"                  # overload, claude is_error — retriable
+    PARSE = "parse"                          # output unparseable — retriable
+    CONTEXT = "context"                      # prompt exceeds the model context window
+    STRUCTURED_OUTPUT = "structured_output"  # claude exhausted its --json-schema retries
 
 
 class ClaudeNotFound(RuntimeError):
@@ -214,38 +221,74 @@ def active_subprocess_count() -> int:
 
 # ---------- Core invocation ----------
 
+def _classify_claude_error(message: str) -> ErrorKind:
+    """Map a claude error string to a retriable vs terminal ErrorKind.
+
+    CONTEXT (prompt too large) and STRUCTURED_OUTPUT (schema retries exhausted)
+    are deterministic for the request as sent — retrying the identical prompt
+    only burns tokens — so they are terminal. Everything else is TRANSIENT.
+    """
+    m = (message or "").lower()
+    if "error_max_structured_output_retries" in m or "max structured output retries" in m:
+        return ErrorKind.STRUCTURED_OUTPUT
+    if (("context" in m and ("window" in m or "length" in m or "exceed" in m))
+            or "prompt is too long" in m or "too many tokens" in m
+            or "maximum context" in m):
+        return ErrorKind.CONTEXT
+    return ErrorKind.TRANSIENT
+
+
 async def spawn_claude(
     prompt: str,
     *,
-    model: str,
-    fallback_model: str,
-    effort: str = "max",
+    model: Optional[str] = None,
+    fallback_model: Optional[str] = None,
+    effort: Optional[str] = None,
     json_schema: Optional[dict] = None,
-    extra_flags: Iterable[str] = (),
-    timeout: float = 300.0,
+    timeout: Optional[float] = None,
 ) -> ClaudeResult:
     """Invoke `claude -p` and return a classified result.
 
-    Never raises for expected failure paths; returns a ClaudeResult with
-    error_kind set. The caller decides whether that counts against a
-    retry budget (see ErrorKind).
+    No wall-clock limit by default (timeout=None): the call runs until claude
+    exits or the awaiting task is cancelled. Ctrl-C (asyncio.run) and daemon
+    SIGTERM (terminate_active_subprocesses) still reap the child — it is
+    registered before the await and the finally block SIGKILLs + unregisters
+    it. Pass a float only to cap a specific call. --model / --effort /
+    --fallback-model are sent only when set, so leaving them unset uses
+    claude's own current defaults. Never raises for expected failures;
+    returns a ClaudeResult with error_kind set (see ErrorKind).
     """
     try:
         claude_bin = resolve_claude_binary()
     except ClaudeNotFound as e:
         return ClaudeResult(error_kind=ErrorKind.INFRA, error_message=str(e))
 
+    # claude -p caps piped stdin at 10 MiB (Claude Code v2.1.128+); a larger
+    # prompt exits non-zero. With the transcript size cap removed and retries
+    # unlimited, guard here so an oversized prompt fails terminally (CONTEXT)
+    # once instead of looping forever. This is claude's own transport limit,
+    # not an artificial chronicle cap.
+    prompt_bytes = prompt.encode()
+    if len(prompt_bytes) > 10 * 1024 * 1024:
+        mb = len(prompt_bytes) / (1024 * 1024)
+        return ClaudeResult(
+            error_kind=ErrorKind.CONTEXT,
+            error_message=f"prompt is {mb:.1f} MiB, over claude -p's 10 MiB stdin cap",
+        )
+
     args = [
         str(claude_bin), "-p",
-        "--model", model,
         "--output-format", "json",
         "--no-session-persistence",
-        "--effort", effort,
-        "--fallback-model", fallback_model,
     ]
+    if model:
+        args += ["--model", model]
+    if effort:
+        args += ["--effort", effort]
+    if fallback_model:
+        args += ["--fallback-model", fallback_model]
     if json_schema is not None:
         args += ["--json-schema", json.dumps(json_schema)]
-    args += list(extra_flags)
 
     env = build_subprocess_env()
 
@@ -274,7 +317,7 @@ async def spawn_claude(
     try:
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(prompt.encode()), timeout=timeout
+                proc.communicate(prompt_bytes), timeout=timeout
             )
         except asyncio.TimeoutError:
             try:
@@ -321,16 +364,17 @@ async def spawn_claude(
         )
         if any(h in combined for h in infra_hints):
             return ClaudeResult(error_kind=ErrorKind.INFRA, error_message=msg)
+        kind = _classify_claude_error(combined)
         # Try to still extract cost if there's JSON output (claude's own error)
         try:
             partial = json.loads(stdout)
             cost = partial.get("total_cost_usd", 0.0) or 0.0
             return ClaudeResult(
                 stdout_json=partial, total_cost_usd=cost,
-                error_kind=ErrorKind.TRANSIENT, error_message=msg,
+                error_kind=kind, error_message=msg,
             )
         except json.JSONDecodeError:
-            return ClaudeResult(error_kind=ErrorKind.TRANSIENT, error_message=msg)
+            return ClaudeResult(error_kind=kind, error_message=msg)
 
     try:
         outer = json.loads(stdout)
@@ -343,10 +387,12 @@ async def spawn_claude(
     cost = outer.get("total_cost_usd", 0.0) or 0.0
 
     if outer.get("is_error"):
+        detail = f"{outer.get('subtype', '')} {outer.get('result', '')}".strip()
         return ClaudeResult(
             stdout_json=outer, total_cost_usd=cost,
-            error_kind=ErrorKind.TRANSIENT,
-            error_message=str(outer.get("result", "claude reported error"))[:300],
+            error_kind=_classify_claude_error(detail),
+            error_message=(str(outer.get("result") or outer.get("subtype")
+                               or "claude reported error"))[:300],
         )
 
     return ClaudeResult(stdout_json=outer, total_cost_usd=cost)

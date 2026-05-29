@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import (
-    chronicle_dir, pid_file, events_file, load_recent_titles,
+    chronicle_dir, events_file, load_recent_titles,
     project_slug_for,
 )
 

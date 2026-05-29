@@ -10,7 +10,8 @@ FAKE_CLAUDE_MODE env var:
   error          JSON with is_error=true, exit 1 (claude's own error path)
   crash          Exit 2 with no stdout (subprocess returncode!=0 path)
   parse          stdout is not JSON (parse-fail path)
-  timeout        Sleep 600s so parent wait_for(300) times out
+  timeout        Sleep 600s; trips a caller that passes an explicit finite
+                 timeout (summarization now defaults to no wall-clock limit)
   no-structured  Valid JSON without structured_output key (fallback to result)
   result         JSON with a top-level `result` string from $FAKE_CLAUDE_RESULT
                  (for insight/story/rewind --summary, which read result["result"])

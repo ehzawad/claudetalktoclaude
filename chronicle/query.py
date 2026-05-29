@@ -151,8 +151,8 @@ def sessions(project_path: str | None = None):
             jsonl_count = len(list(claude_sessions.glob("*.jsonl")))
             if jsonl_count:
                 from .mode import is_background_mode
-                from .daemon import _is_running
-                running, pid = _is_running()
+                from .locks import daemon_is_running
+                running, pid = daemon_is_running()
                 bg = is_background_mode()
                 print(f"Not yet processed. {jsonl_count} session(s) found for '{cwd}'")
                 if bg and running:

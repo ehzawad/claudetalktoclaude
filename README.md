@@ -268,8 +268,8 @@ flowchart TB
     subgraph pipeline["claude_cli.spawn_claude"]
         RESOLVE["resolve claude binary<br/>(shutil.which + fallback dirs)"]
         ENV["strip ANTHROPIC_API_KEY /<br/>AUTH_TOKEN / BASE_URL"]
-        SPAWN["claude -p --json-schema<br/>--effort max<br/>--fallback-model sonnet"]
-        CLASSIFY["classify result:<br/>INFRA / TRANSIENT / PARSE"]
+        SPAWN["claude -p --json-schema<br/>(model/effort/fallback = claude defaults<br/>unless set in config; no timeout)"]
+        CLASSIFY["classify result:<br/>INFRA / TRANSIENT / PARSE /<br/>CONTEXT / STRUCTURED_OUTPUT"]
     end
 
     subgraph write["Write (under processing.lock)"]
@@ -286,16 +286,17 @@ flowchart TB
     RESOLVE --> ENV --> SPAWN --> CLASSIFY
     CLASSIFY -->|success| OK
     CLASSIFY -->|transient / parse| FAIL
+    CLASSIFY -->|context / structured_output| TERM[".failed/&lt;hash&gt;.json<br/>terminal=true (not retried)"]
     CLASSIFY -.->|INFRA| config_fix["user fixes PATH / auth;<br/>no retry budget consumed"]
 ```
 
 **Five-step invariant** on every summarization (foreground or background):
 
-1. Extract the session JSONL, redact secrets (API keys, tokens, JWTs, connection URIs, `.env`/`.pem`/`.key` contents).
+1. Extract the session JSONL **in full** (no size cap), redact secrets (API keys, tokens, JWTs, connection URIs, `.env`/`.pem`/`.key` contents).
 2. Resolve the `claude` binary; build a subprocess env with auth-routing vars stripped.
-3. Invoke `claude -p` under the processing lock (`~/.chronicle/processing.lock`).
-4. Classify the outcome: success / transient / parse / infra.
-5. Write `.processed/` (success) or `.failed/` (transient + terminal flag).
+3. Invoke `claude -p` under the processing lock (`~/.chronicle/processing.lock`) with **no wall-clock timeout** — it runs as long as claude needs and stays Ctrl-C/SIGTERM interruptible.
+4. Classify the outcome: success / transient / parse / infra / context / structured_output.
+5. Write `.processed/` (success) or `.failed/` (transient → terminal after `max_retries`; context/structured_output → terminal immediately).
 
 ---
 
@@ -362,13 +363,14 @@ stateDiagram-v2
 
     Unprocessed --> Success: claude -p ok
     Unprocessed --> Retriable: transient / parse error
+    Unprocessed --> Terminal: context / structured_output error
 
     Retriable --> Success: retry ok
     Retriable --> Retriable: another transient
-    Retriable --> Terminal: attempts == max_retries
+    Retriable --> Terminal: attempts == max_retries (if set)
 
     Success: .processed/&lt;hash&gt;<br/>+ sessions/*.md
-    Retriable: .failed/&lt;hash&gt;.json<br/>terminal=false<br/>attempts &lt; max
+    Retriable: .failed/&lt;hash&gt;.json<br/>terminal=false<br/>(max_retries=null → retry forever)
     Terminal: .failed/&lt;hash&gt;.json<br/>terminal=true
 
     Terminal --> Unprocessed: chronicle process --retry-failed
@@ -388,10 +390,12 @@ flowchart LR
     RC -- yes --> PARSE{"outer JSON<br/>parseable ?"}
     PARSE -- no --> PERR["ErrorKind.PARSE"]
     PARSE -- yes --> ISERR{"outer.is_error ?"}
-    ISERR -- yes --> TRANS["ErrorKind.TRANSIENT"]
+    ISERR -- yes --> SNIFF{"message =<br/>context / schema-retries ?"}
+    SNIFF -- yes --> TERM["ErrorKind.CONTEXT /<br/>STRUCTURED_OUTPUT<br/>(terminal — not retried)"]
+    SNIFF -- no --> TRANS["ErrorKind.TRANSIENT"]
     ISERR -- no --> OK["Success"]
 
-    PERR --> COUNT["counts against max_retries"]
+    PERR --> COUNT["counts against max_retries<br/>(null = unlimited)"]
     TRANS --> COUNT
 ```
 
@@ -448,9 +452,10 @@ Turn-by-turn log · decisions with status + rationale + alternatives · problems
 | Key | Default | Scope | Description |
 |---|---|---|---|
 | `processing_mode` | `"foreground"` | both | `"foreground"` or `"background"`. Set via `chronicle install-daemon` / `uninstall-daemon`. |
-| `model` | `"opus"` | both | Primary model for summarization. |
-| `fallback_model` | `"sonnet"` | both | Auto-fallback when primary overloaded. |
-| `max_retries` | `3` | both | Transient failures flip terminal after N attempts. |
+| `model` | `null` | both | Summarization model. `null` ⇒ let `claude -p` use its own default (auto-follows Claude Code). Set e.g. `"opus[1m]"` for the 1M-context window on very large sessions. |
+| `effort` | `null` | both | Reasoning effort passed to `--effort`. `null` ⇒ claude's default. |
+| `fallback_model` | `null` | both | `--fallback-model` (sent only when set). `null` avoids silently dropping to a smaller-context model. |
+| `max_retries` | `null` | both | Transient/parse failures flip terminal after N attempts. `null` ⇒ unlimited (never give up). Context-window and structured-output failures are always terminal immediately. |
 | `skip_projects` | `[]` | both | Project slugs (substrings) to exclude. |
 | `concurrency` | `5` | background | Parallel workers in the daemon. (`chronicle process --workers` overrides for that invocation.) |
 | `poll_interval_seconds` | `5` | background | Daemon event-journal poll cadence. |

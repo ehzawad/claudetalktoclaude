@@ -227,8 +227,9 @@ def generate_insight(project_name: str | None = None):
     prompt = INSIGHT_PROMPT.format(data=json.dumps(payload, indent=2))
 
     config = load_config()
-    model = config.get("model", "opus")
-    fallback = config.get("fallback_model", "sonnet")
+    model = config.get("model")
+    fallback = config.get("fallback_model")
+    effort = config.get("effort")
 
     print(f"  Generating insight for {project_dir.name} "
           f"({len(sessions)} sessions)...")
@@ -236,7 +237,7 @@ def generate_insight(project_name: str | None = None):
     async def _generate():
         res = await spawn_claude(
             prompt=prompt, model=model, fallback_model=fallback,
-            effort="max", timeout=300,
+            effort=effort,
         )
         if not res.ok:
             print(f"  Error ({res.error_kind.value}): {res.error_message[:200]}",

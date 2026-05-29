@@ -38,7 +38,7 @@ CHRONICLE_JSON_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "what": {"type": "string"},
-                    "status": {"type": "string", "enum": ["made", "rejected", "tentative"]},
+                    "status": {"type": "string"},
                     "why": {"type": "string"},
                     "context": {"type": "string"},
                     "alternatives_considered": {"type": "array", "items": {"type": "string"}},
@@ -116,8 +116,29 @@ CHRONICLE_JSON_SCHEMA = {
         "open_questions": {"type": "array", "items": {"type": "string"}},
         "files_changed": {"type": "array", "items": {"type": "string"}},
         "cross_references": {"type": "array", "items": {"type": "string"}},
+        # Open-ended capture for anything the fixed fields don't model: new
+        # Claude Code features (Agent Teams coordination, subagent delegation,
+        # skills invoked, goals, dynamic workflows, new tool types). The model
+        # is told to use this for novel activity so it is chronicled rather
+        # than dropped. Keeps the schema future-proof (D2).
+        "notable_activity": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string"},
+                    "detail": {"type": "string"},
+                    "evidence": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["kind", "detail"],
+            },
+        },
+        "tags": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["is_empty", "title"],
+    # Do NOT forbid extra keys — let the model surface fields the schema does
+    # not yet model rather than failing --json-schema validation (D2).
+    "additionalProperties": True,
 }
 
 SUMMARIZATION_PROMPT = """\
@@ -160,6 +181,12 @@ learned. These moments reveal what wasn't obvious and what the developer needed 
 thought process to a colleague over coffee, not like a formal report. Use "we tried", "turns out", \
 "the problem was", "so instead we". Include the moments of confusion, realization, and discovery.
 
+- CAPTURE NOVEL ACTIVITY: If the session uses Claude Code features that don't fit the \
+fixed fields — Agent Teams / subagent coordination, skills invoked, dynamic workflows, \
+goals, scheduled wakeups, interactive questions, or any tool/activity you don't have a \
+dedicated field for — record each in "notable_activity" with a short "kind", a "detail", \
+and supporting "evidence". Do not drop it just because there is no obvious field.
+
 Return structured output matching the provided JSON Schema. When in doubt, include more \
 technical detail rather than less.
 
@@ -190,6 +217,9 @@ class ChronicleEntry:
     open_questions: list = field(default_factory=list)
     files_changed: list = field(default_factory=list)
     cross_references: list = field(default_factory=list)
+    notable_activity: list = field(default_factory=list)  # novel/new-feature activity (D2)
+    tags: list = field(default_factory=list)
+    extras: dict = field(default_factory=dict)  # passthrough for unknown structured keys (D2)
     is_empty: bool = False
     is_error: bool = False  # summarization failed
     error_kind: str = ""  # "infra" | "transient" | "parse" | "" (no error)
@@ -250,6 +280,17 @@ def _populate_entry_from_structured(data: dict, entry: ChronicleEntry) -> Chroni
     entry.open_questions = _as_list(data.get("open_questions", []))
     entry.files_changed = _as_list(data.get("files_changed", []))
     entry.cross_references = _as_list(data.get("cross_references", []))
+    entry.notable_activity = _as_list(data.get("notable_activity", []))
+    entry.tags = _as_list(data.get("tags", []))
+    # Capture any top-level key the schema does not yet model so new Claude
+    # Code features the model surfaces are rendered, not silently dropped (D2).
+    _known = {
+        "is_empty", "title", "summary", "narrative", "decisions",
+        "problems_solved", "human_reasoning", "follow_ups", "technical_details",
+        "architecture", "planning", "open_questions", "files_changed",
+        "cross_references", "notable_activity", "tags",
+    }
+    entry.extras = {k: v for k, v in data.items() if k not in _known and v}
     return entry
 
 
@@ -275,17 +316,20 @@ def _extract_structured(outer: dict) -> dict | None:
 async def async_summarize_session(digest: SessionDigest) -> ChronicleEntry:
     """One-shot summarization via claude -p with --json-schema validation.
 
-    Uses --no-session-persistence so observer calls never appear in the user's
-    session list. Uses --effort max for thorough reasoning and --fallback-model
-    for resilience when the primary model is overloaded.
+    --no-session-persistence keeps observer calls out of the user's session
+    list. model / effort / fallback_model come from config and default to
+    unset, so claude -p uses its own current defaults. No wall-clock timeout
+    and no transcript size cap: the whole session is summarized for as long as
+    claude can process it (still interruptible via Ctrl-C / SIGTERM).
 
-    Classifies failures via claude_cli.ErrorKind so the caller (storage.write_chronicle)
-    can distinguish infrastructure errors (don't charge retries) from transient /
-    parse errors (do charge retries).
+    Failures are classified via claude_cli.ErrorKind so write_chronicle can
+    distinguish infra (don't charge retries) and deterministic context /
+    structured-output errors (terminal) from retriable transient / parse ones.
     """
     config = load_config()
-    model = config.get("model", "opus")
-    fallback = config.get("fallback_model", "sonnet")
+    model = config.get("model")
+    fallback = config.get("fallback_model")
+    effort = config.get("effort")
 
     entry = _make_entry(digest)
 
@@ -311,9 +355,8 @@ async def async_summarize_session(digest: SessionDigest) -> ChronicleEntry:
         prompt=prompt,
         model=model,
         fallback_model=fallback,
-        effort="max",
+        effort=effort,
         json_schema=CHRONICLE_JSON_SCHEMA,
-        timeout=300,
     )
 
     entry.total_cost_usd = result.total_cost_usd
@@ -539,6 +582,46 @@ def entry_to_session_markdown(entry: ChronicleEntry) -> str:
             lines.append(f"- {ref}")
         lines.append("")
 
+    # Notable activity — novel / new-feature work the fixed fields don't model
+    if entry.notable_activity:
+        lines.append("## Notable activity")
+        lines.append("")
+        for na in entry.notable_activity:
+            if isinstance(na, dict):
+                kind = na.get("kind", "")
+                detail = na.get("detail", "")
+                evidence = na.get("evidence", [])
+                header = f"**{kind}**" if kind else "**Activity**"
+                lines.append(f"{header}: {detail}" if detail else header)
+                if isinstance(evidence, list):
+                    for e in evidence:
+                        lines.append(f"- `{e}`")
+                lines.append("")
+            else:
+                lines.append(f"- {na}")
+        lines.append("")
+
+    # Tags
+    if entry.tags:
+        lines.append("**Tags**: " + ", ".join(str(t) for t in entry.tags))
+        lines.append("")
+
+    # Extras — any structured field the model emitted that the schema doesn't
+    # yet model. Render conservatively (scalars only; skip empties) so new
+    # Claude Code features are captured without noisy raw dumps.
+    if entry.extras:
+        lines.append("## Other")
+        lines.append("")
+        for k, v in entry.extras.items():
+            if isinstance(v, (str, int, float, bool)):
+                lines.append(f"**{k}**: {v}")
+            elif isinstance(v, list):
+                lines.append(f"**{k}**:")
+                for item in v:
+                    if isinstance(item, (str, int, float, bool)):
+                        lines.append(f"- {item}")
+            lines.append("")
+
     # Files changed
     if entry.files_changed:
         lines.append("## Files changed")
@@ -547,13 +630,15 @@ def entry_to_session_markdown(entry: ChronicleEntry) -> str:
             lines.append(f"- `{f}`")
         lines.append("")
 
-    # Turn-by-turn chronological log
+    # Turn-by-turn chronological log. Fence with FOUR backticks: tool output
+    # is no longer size-capped and can itself contain ``` fences, which would
+    # otherwise close the block early and corrupt the markdown.
     if entry.turn_log:
         lines.append("## Turn-by-turn log")
         lines.append("")
-        lines.append("```")
+        lines.append("````")
         lines.append(entry.turn_log)
-        lines.append("```")
+        lines.append("````")
         lines.append("")
 
     # User prompts (verbatim) at the end as reference

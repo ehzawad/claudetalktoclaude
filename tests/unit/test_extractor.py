@@ -236,15 +236,16 @@ class TestSystemTagStripping:
         assert "<img src=foo/>" in cleaned
 
 
-# ---------- Tool-result truncation ----------
+# ---------- Tool-result extraction (no size cap — whole transcript kept) ----------
 
-class TestToolResultTruncation:
-    def test_large_result_truncated_with_marker(self):
-        big = "a" * (extractor._MAX_TOOL_RESULT_CHARS + 1000)
+class TestToolResultExtraction:
+    def test_large_result_preserved_in_full(self):
+        # No size cap anymore: the whole tool result is summarized verbatim
+        # (claude -p's 10 MiB stdin limit is the only ceiling).
+        big = "a" * 50_000
         out = extractor._extract_tool_result_text(big)
-        assert out is not None
-        assert "[... truncated ...]" in out
-        assert len(out) < extractor._MAX_TOOL_RESULT_CHARS + 100
+        assert out == big
+        assert "[... truncated ...]" not in out
 
     def test_small_result_not_truncated(self):
         small = "short output"

@@ -549,13 +549,15 @@ def _retrofit_timeline(chronicle_file, existing: str):
     _atomic_write(chronicle_file, header + timeline + body)
 
 
-def write_chronicle(entry, digest, max_retries: int = 3):
+def write_chronicle(entry, digest, max_retries: int | None = 3):
     """Write per-session detail file and append to cumulative chronicle.
 
     Retry accounting respects entry.error_kind:
-      - "infra"   → do NOT count against retries (config/env issue, not session-specific)
-      - "transient" or "parse" → count; on hitting max_retries, flip .failed to terminal
-      - ""        → success path (clears any prior .failed record)
+      - "infra"                       → not counted (config/env issue, not session-specific)
+      - "context"/"structured_output" → deterministic for this prompt → terminal at once
+      - "transient"/"parse"           → counted; terminal once attempts reach max_retries
+                                        (max_retries=None never gives up)
+      - ""                            → success path (clears any prior .failed record)
     """
     if entry.is_error:
         if entry.error_kind == "infra":
@@ -566,10 +568,24 @@ def write_chronicle(entry, digest, max_retries: int = 3):
                   f"(not counted): {entry.error_message[:150]}")
             return
 
+        # Deterministic failures (prompt too large / schema retries exhausted):
+        # re-running the identical prompt can't help, so give up immediately
+        # instead of burning the (now possibly unlimited) retry budget.
+        if entry.error_kind in ("context", "structured_output"):
+            record_failed_attempt(
+                digest.session_id,
+                error_kind=entry.error_kind,
+                error_message=entry.error_message or "(no detail)",
+                terminal=True,
+            )
+            print(f"[chronicle] not retrying {digest.session_id[:8]} "
+                  f"(kind={entry.error_kind}): {entry.error_message[:150]}")
+            return
+
         # Transient / parse — decide terminal flag before writing.
         current = get_attempt_count(digest.session_id)
         will_be = current + 1
-        terminal = will_be >= max_retries
+        terminal = max_retries is not None and will_be >= max_retries
         attempts = record_failed_attempt(
             digest.session_id,
             error_kind=entry.error_kind or "transient",
@@ -581,8 +597,9 @@ def write_chronicle(entry, digest, max_retries: int = 3):
                   f"after {attempts} failed attempts "
                   f"(kind={entry.error_kind or 'unknown'})")
         else:
+            limit = max_retries if max_retries is not None else "∞"
             print(f"[chronicle] transient error for {digest.session_id[:8]} "
-                  f"(attempt {attempts}/{max_retries}): "
+                  f"(attempt {attempts}/{limit}): "
                   f"{entry.error_message[:150]}")
         return
 

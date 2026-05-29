@@ -137,7 +137,13 @@ class TestTransientErrorGoesTerminalAfterMaxRetries:
         sid = str(uuid.uuid4())
         _seed_jsonl(home / ".claude" / "projects", slug, sid)
 
-        # Default max_retries is 3. Run `process` with fake_mode=error 3 times.
+        # max_retries now defaults to None (unlimited); pin it to 3 so the
+        # terminal-after-N mechanic is exercised deterministically.
+        cdir = home / ".chronicle"
+        cdir.mkdir(parents=True, exist_ok=True)
+        (cdir / "config.json").write_text('{"max_retries": 3}')
+
+        # Run `process` with fake_mode=error 3 times → terminal on the 3rd.
         for i in range(3):
             result = _run_chronicle(["process", "--workers", "1"],
                                     home=home, bin_dir=bin_dir, fake_mode="error")
@@ -160,6 +166,12 @@ class TestRetryFailedRecovers:
         slug = "-tmp-recover"
         sid = str(uuid.uuid4())
         _seed_jsonl(home / ".claude" / "projects", slug, sid)
+
+        # Pin max_retries=3 (default is now None = unlimited) so the session
+        # reaches terminal failure after 3 attempts.
+        cdir = home / ".chronicle"
+        cdir.mkdir(parents=True, exist_ok=True)
+        (cdir / "config.json").write_text('{"max_retries": 3}')
 
         # First: drive to terminal failure
         for _ in range(3):

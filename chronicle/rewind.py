@@ -306,15 +306,16 @@ Keep it under 300 words.
 
     from .config import load_config
     config = load_config()
-    model = config.get("model", "opus")
+    model = config.get("model")
 
     print(f"  Summarizing sessions #{start_num}–#{sessions[-1]['number']}...\n")
 
     async def _summarize():
-        fallback = config.get("fallback_model", "sonnet")
+        fallback = config.get("fallback_model")
+        effort = config.get("effort")
         res = await spawn_claude(
             prompt=prompt, model=model, fallback_model=fallback,
-            effort="low", timeout=300,
+            effort=effort,
         )
         if not res.ok:
             return None

@@ -1,16 +1,16 @@
 """Parse Claude Code session JSONL files and extract meaningful content.
 
 The JSONL files at ~/.claude/projects/<slug>/<session-id>.jsonl contain every
-message exchanged in a session. This module extracts structured content
-preserving chronological order for high-fidelity summarization.
+message exchanged in a session. This module extracts structured content,
+preserving chronological order, for high-fidelity summarization. Unknown
+top-level message types, content blocks, and tool names are captured
+generically so new Claude Code features are never silently dropped.
 
-Two output formats:
-- digest_to_text(): filtered for LLM context window (80K chars default, with
-  front+tail middle-elision if the timeline exceeds it).
-- timeline_to_log(): redacted chronological log for the session markdown.
-  The full timeline is kept, but individual tool results above ~10KB are
-  capped with a front+tail split, and secrets are masked in commands, tool
-  inputs, and tool outputs by the same redaction layer.
+Two output formats, both uncapped (the whole session is kept) with secrets
+masked in commands, tool inputs, and tool outputs:
+- digest_to_text():  interleaved timeline with one-liner tool summaries, fed
+  to claude -p for summarization.
+- timeline_to_log(): full chronological log for the archival session markdown.
 """
 
 import json
@@ -164,8 +164,6 @@ _SYSTEM_TAG_PATTERN = re.compile(
     re.DOTALL,
 )
 
-_MAX_TOOL_RESULT_CHARS = 10000
-
 
 def _is_real_user_prompt(content: str) -> bool:
     """Check if a user message is a real prompt (not system-injected)."""
@@ -203,6 +201,19 @@ def _extract_tool(block: dict) -> tuple[str | None, ToolDetail | None]:
 
     name = block.get("name", "unknown")
     inp = block.get("input", {})
+    if not isinstance(inp, dict):
+        inp = {}
+
+    # Canonicalize casing so a renamed/lowercased builtin (e.g. the observed
+    # lowercase 'bash') keeps its dedicated rendering + redaction path instead
+    # of degrading to the generic dump.
+    _CANON = {
+        "bash": "Bash", "edit": "Edit", "write": "Write", "read": "Read",
+        "glob": "Glob", "grep": "Grep", "agent": "Agent", "skill": "Skill",
+        "websearch": "WebSearch", "webfetch": "WebFetch", "multiedit": "MultiEdit",
+    }
+    if name in _CANON:
+        name = _CANON[name]
 
     if name == "Bash":
         cmd = _redact_secrets(inp.get("command", ""))
@@ -268,6 +279,53 @@ def _extract_tool(block: dict) -> tuple[str | None, ToolDetail | None]:
             tool="MultiEdit", summary=f"MultiEdit: {path} ({count} regions)",
             path=path, content=f"{count} edit regions")
 
+    elif name in ("TaskCreate", "TaskUpdate", "TaskList", "TaskStop"):
+        # Agent Teams / task tracking (first-class CLI feature). Surface the
+        # task subject + status transition so the summarizer can chronicle
+        # coordination, not emit a content-free bullet.
+        subject = _redact_secrets(str(
+            inp.get("subject") or inp.get("description") or inp.get("activeForm") or ""))
+        task_id = str(inp.get("taskId") or inp.get("id") or "")
+        status = str(inp.get("status") or "")
+        bits = [b for b in (task_id, status) if b]
+        head = subject[:80] if subject else (" ".join(bits) if bits else "")
+        tail = f" -> {status}" if status and subject else ""
+        summary = f"{name}: {head}{tail}".rstrip(": ").rstrip()
+        return summary, ToolDetail(
+            tool=name, summary=summary,
+            description=subject, content=_redact_secrets(str(inp))[:500])
+
+    elif name == "Workflow":
+        # Dynamic workflows. Capture the workflow name / first script line.
+        wf = _redact_secrets(str(
+            inp.get("name") or inp.get("workflow") or inp.get("script") or ""))
+        summary = f"Workflow: {wf[:100]}".rstrip(": ").rstrip()
+        return summary, ToolDetail(
+            tool="Workflow", summary=summary,
+            content=_redact_secrets(str(inp))[:500])
+
+    elif name == "AskUserQuestion":
+        # Interactive question. Flatten the question text(s).
+        questions = inp.get("questions")
+        qtext = ""
+        if isinstance(questions, list) and questions:
+            first = questions[0]
+            qtext = first.get("question", "") if isinstance(first, dict) else str(first)
+        qtext = _redact_secrets(qtext or str(inp.get("question") or ""))
+        summary = f"AskUserQuestion: {qtext[:100]}".rstrip(": ").rstrip()
+        return summary, ToolDetail(
+            tool="AskUserQuestion", summary=summary,
+            content=_redact_secrets(str(inp))[:500])
+
+    elif name == "NotebookEdit":
+        path = inp.get("notebook_path", "") or inp.get("file_path", "")
+        cell = inp.get("cell_type", "")
+        suffix = f" ({cell})" if cell else ""
+        summary = f"NotebookEdit: {path}{suffix}"
+        return summary, ToolDetail(
+            tool="NotebookEdit", summary=summary, path=path,
+            content=_redact_secrets(str(inp.get("new_source") or inp.get("content") or "")))
+
     elif name.startswith("mcp__"):
         parts = name.split("__", 2)
         server = parts[1] if len(parts) > 1 else ""
@@ -285,14 +343,34 @@ def _extract_tool(block: dict) -> tuple[str | None, ToolDetail | None]:
             tool=f"MCP({server}): {tool}", summary=summary, query=query_val)
 
     else:
+        # Unknown / future tool. Claude Code ships new tools daily; rather than
+        # collapse to a bare name, probe a broad key list, then fall back to the
+        # first short scalar values in the input so the LLM-facing one-liner
+        # still conveys the tool's payload. ALWAYS redact — arbitrary tools can
+        # carry arbitrary secrets.
+        _PROBE_KEYS = (
+            "query", "question", "prompt", "file_path", "command", "url",
+            "subject", "description", "status", "taskId", "script", "plan",
+            "skill", "notebook_path", "pattern", "content", "name",
+        )
         detail_text = ""
-        for key in ("query", "question", "prompt", "file_path", "command", "url"):
+        for key in _PROBE_KEYS:
             if inp.get(key):
                 detail_text = f": {_redact_secrets(str(inp[key]))[:80]}"
                 break
+        if not detail_text and isinstance(inp, dict):
+            # Generic scalar render: join the first 2 short scalar values.
+            scalars = []
+            for v in inp.values():
+                if isinstance(v, (str, int, float, bool)):
+                    s = _redact_secrets(str(v)).strip()
+                    if s:
+                        scalars.append(s[:60])
+                if len(scalars) >= 2:
+                    break
+            if scalars:
+                detail_text = ": " + " ".join(scalars)
         summary = f"{name}{detail_text}"
-        # The full input dict can carry arbitrary secrets from arbitrary MCP
-        # / custom tools — always redact the string dump.
         return summary, ToolDetail(
             tool=name, summary=summary,
             content=_redact_secrets(str(inp))[:500],
@@ -300,7 +378,9 @@ def _extract_tool(block: dict) -> tuple[str | None, ToolDetail | None]:
 
 
 def _extract_tool_result_text(content) -> str | None:
-    """Extract text from tool_result blocks. Keeps ALL results (no signal filter)."""
+    """Extract text from tool_result blocks. Keeps ALL results in full — no
+    size cap, so the whole transcript is summarized (secrets are still
+    redacted). claude -p's 10 MiB stdin limit is the only ceiling."""
     if isinstance(content, str):
         raw = content
     elif isinstance(content, list):
@@ -315,15 +395,7 @@ def _extract_tool_result_text(content) -> str | None:
     if not raw or not raw.strip():
         return None
 
-    # Redact secrets before truncation
-    raw = _redact_secrets(raw)
-
-    # Cap at 10KB with front+tail for very large results
-    if len(raw) > _MAX_TOOL_RESULT_CHARS:
-        half = _MAX_TOOL_RESULT_CHARS // 2
-        raw = raw[:half] + "\n[... truncated ...]\n" + raw[-half:]
-
-    return raw.strip()
+    return _redact_secrets(raw).strip()
 
 
 def _extract_user_tool_results(content) -> list[str]:
@@ -444,6 +516,20 @@ def extract_session(jsonl_path: str) -> SessionDigest:
                                 turn_tool_actions.append(summary)
                             if detail:
                                 turn_tool_details.append(detail)
+                        elif btype == "thinking":
+                            # Claude Code stores reasoning signature-only (the
+                            # plaintext is stripped on disk); capturing it would
+                            # inject an opaque base64 blob. Record nothing.
+                            pass
+                        elif btype:
+                            # Unknown / future block shape (e.g. 'image', or any
+                            # new transcript block Claude Code adds). Capture a
+                            # content-free marker so the activity reaches the
+                            # summarizer without bloating the prompt with raw
+                            # (possibly base64 / secret-bearing) payloads.
+                            marker = f"[{btype} block]"
+                            digest.tool_actions.append(marker)
+                            turn_tool_actions.append(marker)
                     full_text = _redact_secrets("\n".join(text_parts).strip())
                     if full_text:
                         digest.assistant_responses.append(full_text)
@@ -461,6 +547,20 @@ def extract_session(jsonl_path: str) -> SessionDigest:
                     tool_details=turn_tool_details,
                 ))
 
+            elif entry_type:
+                # Unknown / future top-level message type. Claude Code adds new
+                # event kinds over time (agent-team / subagent / goal events,
+                # etc.); capture any text they carry under their own role label
+                # so the activity reaches the summarizer instead of vanishing.
+                other_text = _extract_text_from_content(content)
+                if other_text and other_text.strip():
+                    digest.timeline.append(TimelineEntry(
+                        role=entry_type,
+                        timestamp=timestamp,
+                        text=_redact_secrets(
+                            _SYSTEM_TAG_PATTERN.sub("", other_text).strip()),
+                    ))
+
     digest.total_turns = len(digest.timeline)
 
     # Fallback: derive timestamps from file mtime when JSONL has none
@@ -475,10 +575,12 @@ def extract_session(jsonl_path: str) -> SessionDigest:
     return digest
 
 
-def digest_to_text(digest: SessionDigest, max_chars: int = 80000) -> str:
+def digest_to_text(digest: SessionDigest, max_chars: int | None = None) -> str:
     """Format a digest as an interleaved timeline for the LLM prompt.
 
-    Uses one-liner tool summaries and front+tail truncation for context window.
+    One-liner tool summaries; the whole timeline is included. max_chars is None
+    by default (no size cap) so the entire session is summarized; pass an int to
+    front+tail truncate. claude -p's 10 MiB stdin limit is the only ceiling.
     """
     parts = []
 
@@ -526,9 +628,16 @@ def digest_to_text(digest: SessionDigest, max_chars: int = 80000) -> str:
                 for result in turn.tool_results:
                     timeline_parts.append(result)
 
+        elif turn.text:
+            # Unknown / future role (see extract_session): label it generically
+            # so new transcript shapes are summarized rather than dropped.
+            timeline_parts.append(f"\n[{ts}] {turn.role.upper()}")
+            timeline_parts.append(turn.text)
+
     timeline_text = "\n".join(timeline_parts)
 
-    if len(timeline_text) > max_chars:
+    # No size cap by default (max_chars=None): summarize the whole session.
+    if max_chars is not None and len(timeline_text) > max_chars:
         front_budget = int(max_chars * 0.75)
         tail_budget = max_chars - front_budget
         front = timeline_text[:front_budget]
@@ -617,6 +726,13 @@ def timeline_to_log(digest: SessionDigest) -> str:
                 lines.append(f"\n[{ts}] TOOL OUTPUT:")
                 for line in result.split("\n"):
                     lines.append(f"  {line}")
+
+        elif turn.text:
+            # Unknown / future role: label it generically so the archival log
+            # records new transcript shapes instead of dropping them.
+            lines.append(f"\n[{ts}] {turn.role.upper()}:")
+            for line in turn.text.split("\n"):
+                lines.append(f"  {line}")
 
     return "\n".join(lines)
 

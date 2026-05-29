@@ -85,13 +85,18 @@ PROCESSING_MODES = ("foreground", "background")
 DEFAULT_CONFIG = {
     "processing_mode": "foreground",
     "concurrency": 5,
-    "model": "opus",
     "poll_interval_seconds": 5,
     "quiet_minutes": 5,
     "scan_interval_minutes": 30,
-    "max_retries": 3,
+    "max_retries": None,      # None = unlimited retriable attempts; context/schema errors stay terminal
     "skip_projects": [],
-    "fallback_model": "sonnet",
+    # model / effort / fallback_model default to None = let `claude -p` use ITS
+    # OWN defaults, so chronicle automatically follows Claude Code's evolving
+    # default model and effort. Set any of these to pin a choice — e.g.
+    # "model": "opus[1m]" for the 1M-context window on very large transcripts.
+    "model": None,
+    "effort": None,
+    "fallback_model": None,
 }
 
 

@@ -114,20 +114,12 @@ def generate_story(project_name: str | None = None):
         session_blocks.append(f"=== SESSION: {filename} ===\n{content}")
     sessions_text = "\n\n".join(session_blocks)
 
-    # Truncate if enormous — keep head (early sessions) + tail (recent sessions)
-    # so the "Current State" section has fresh data to work with
-    max_chars = 400_000
-    if len(sessions_text) > max_chars:
-        half = max_chars // 2
-        sessions_text = (sessions_text[:half]
-                         + "\n\n[... middle sessions truncated ...]\n\n"
-                         + sessions_text[-half:])
-
-    prompt = STORY_PROMPT.format(sessions=sessions_text)
+    prompt = STORY_PROMPT.format(sessions=sessions_text)  # no size cap — claude's 10 MiB stdin limit applies
 
     config = load_config()
-    model = config.get("model", "opus")
-    fallback = config.get("fallback_model", "sonnet")
+    model = config.get("model")
+    fallback = config.get("fallback_model")
+    effort = config.get("effort")
 
     print(f"  Generating story for {project_dir.name} "
           f"({len(session_pairs)} sessions)...")
@@ -135,7 +127,7 @@ def generate_story(project_name: str | None = None):
     async def _generate():
         res = await spawn_claude(
             prompt=prompt, model=model, fallback_model=fallback,
-            effort="max", timeout=600,
+            effort=effort,
         )
         if not res.ok:
             print(f"  Error ({res.error_kind.value}): {res.error_message[:200]}",
