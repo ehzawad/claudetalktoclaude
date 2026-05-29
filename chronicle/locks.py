@@ -127,7 +127,11 @@ def processing_lock_held() -> bool:
     if not processing_lock_path().exists():
         return False
     try:
-        fd = os.open(str(processing_lock_path()), os.O_RDONLY | os.O_CREAT, 0o600)
+        # O_RDONLY only — never O_CREAT: this is a read-only diagnostic and must
+        # not create a stray lock file if the path is race-deleted between the
+        # exists() check above and here (PR #1 review). A missing file raises
+        # FileNotFoundError (an OSError), handled below as not-held.
+        fd = os.open(str(processing_lock_path()), os.O_RDONLY)
     except OSError:
         # Cannot probe (race-deleted file, permission denied, path turned
         # into a dir, etc.) -> treat as not held. A read-only diagnostic

@@ -94,6 +94,19 @@ class TestProcessingLockHeldBug14:
         # A read-only diagnostic must report not-held instead of crashing.
         assert locks.processing_lock_held() is False
 
+    def test_no_stray_lock_file_on_toctou_race(self, chronicle_env, monkeypatch):
+        # PR #1 review (C3): the probe must use O_RDONLY (not O_CREAT). Simulate
+        # the TOCTOU race where exists() passes but the file is gone at open():
+        # it must report not-held AND must not create a stray lock file.
+        from chronicle import locks
+        lp = locks.processing_lock_path()
+        lp.parent.mkdir(parents=True, exist_ok=True)
+        assert not lp.exists()
+        monkeypatch.setattr(type(lp), "exists", lambda self: True)
+        assert locks.processing_lock_held() is False
+        # os.path.exists is not monkeypatched -> checks the real filesystem.
+        assert not os.path.exists(str(lp)), "read-only probe created a stray lock file"
+
 
 # ---------------- BUG-19 ----------------
 
@@ -273,6 +286,56 @@ class TestSpawnClaudeCancelBug07:
             await asyncio.sleep(0.02)
         assert not _pid_alive(child_pid), "claude -p child orphaned after cancel"
         assert claude_cli.active_subprocess_count() == 0
+        claude_cli._reset_cache_for_tests()
+
+    async def test_double_cancel_no_registry_leak(self, tmp_path, monkeypatch):
+        # PR #1 review (C1): a SECOND CancelledError landing inside the finally's
+        # awaited reap must not skip _unregister. The single-cancel test above
+        # passes even on the buggy ordering; this re-entrant-cancel test does not.
+        from chronicle import claude_cli
+        pidfile = tmp_path / "child2.pid"
+        bindir = tmp_path / "bin2"
+        bindir.mkdir(parents=True)
+        stub = bindir / "claude"
+        stub.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys, time\n"
+            f"open({str(pidfile)!r}, 'w').write(str(os.getpid()))\n"
+            "sys.stdin.read()\n"
+            "time.sleep(120)\n"
+        )
+        stub.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bindir}:/usr/bin:/bin")
+        claude_cli._reset_cache_for_tests()
+
+        assert claude_cli.active_subprocess_count() == 0
+        task = asyncio.create_task(
+            claude_cli.spawn_claude("p", model="opus", fallback_model="sonnet")
+        )
+        for _ in range(200):
+            if pidfile.exists() and pidfile.read_text().strip():
+                break
+            await asyncio.sleep(0.02)
+        child_pid = int(pidfile.read_text().strip())
+        assert claude_cli.active_subprocess_count() == 1
+
+        # Cancel repeatedly across event-loop turns so a second CancelledError
+        # lands during the finally's awaited reap.
+        for _ in range(8):
+            task.cancel()
+            try:
+                await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                pass
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        for _ in range(100):
+            if claude_cli.active_subprocess_count() == 0 and not _pid_alive(child_pid):
+                break
+            await asyncio.sleep(0.02)
+        assert claude_cli.active_subprocess_count() == 0, "registry leaked under re-entrant cancel"
+        assert not _pid_alive(child_pid), "child orphaned under re-entrant cancel"
         claude_cli._reset_cache_for_tests()
 
 
