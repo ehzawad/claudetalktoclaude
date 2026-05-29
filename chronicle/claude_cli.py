@@ -287,19 +287,26 @@ async def spawn_claude(
                 error_message=f"claude -p timed out after {timeout}s",
             )
     finally:
-        # Defensive: on any exit path where the child is still alive
-        # (notably asyncio.CancelledError from `chronicle process` Ctrl-C
-        # teardown or task cancellation), kill and reap it before
-        # unregistering so it can't keep running detached and burning
-        # subscription tokens. Normal-completion and timeout paths have
-        # returncode already set, so this is a no-op for them.
-        if proc.returncode is None:
+        # Re-entrant cancellation safety (PR #1 review / BUG-07): a SECOND
+        # CancelledError can land on the awaited reap below and abort this
+        # finally, skipping cleanup. Do the synchronous steps FIRST — send
+        # SIGKILL to a still-alive child and DROP the registry entry — so the
+        # signal is delivered and _active_procs is cleaned even if the reap is
+        # interrupted. The asyncio child watcher reaps the SIGKILLed child
+        # regardless; the await below is best-effort tidy-up. Normal-completion
+        # and timeout paths already have returncode set, so this is a no-op.
+        alive = proc.returncode is None
+        if alive:
             try:
                 proc.kill()
-                await proc.wait()
             except ProcessLookupError:
                 pass
         _unregister(proc)
+        if alive:
+            try:
+                await proc.wait()
+            except ProcessLookupError:
+                pass
 
     stdout = stdout_bytes.decode(errors="replace")
     stderr = stderr_bytes.decode(errors="replace")
