@@ -68,19 +68,36 @@ def daemon_lock_still_valid() -> bool:
 
 
 def daemon_is_running() -> tuple[bool, Optional[int]]:
-    """Check if a daemon is running based on PID file + process liveness.
+    """Check whether a daemon is running, authoritatively via the daemon.pid
+    flock (the OS auto-releases it when the owning process dies).
 
-    Returns (is_running, pid_or_None). Not authoritative across hosts;
-    only valid locally.
+    Liveness is decided by whether the lock is HELD, not by os.kill on the
+    persisted PID — a recycled PID could otherwise mask a dead daemon as
+    "running" and make `daemon --stop` SIGTERM an unrelated process (BUG-10).
+    Returns (is_running, pid_or_None). Local-only.
     """
     if not pid_file().exists():
         return False, None
     try:
-        pid = int(pid_file().read_text().strip())
-        os.kill(pid, 0)
-        return True, pid
-    except (ValueError, OSError):
+        fd = os.open(str(pid_file()), os.O_RDONLY)
+    except OSError:
         return False, None
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (OSError, IOError):
+            # Lock held by a live owner -> a real daemon is running.
+            try:
+                pid = int(os.read(fd, 64).decode().strip())
+            except (ValueError, OSError):
+                pid = None
+            return True, pid
+        else:
+            # We acquired it freely -> no live owner. Release and report dead.
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return False, None
+    finally:
+        os.close(fd)
 
 
 def _reset_daemon_lock_for_tests() -> None:

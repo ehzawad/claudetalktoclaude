@@ -27,6 +27,25 @@ from .config import (
 )
 
 _MAX_ERROR_LOG_BYTES = 1_000_000  # ~1MB cap
+_MAX_EVENTS_BYTES = 5 * 1024 * 1024  # ~5 MiB foreground cap for events.jsonl
+
+
+def _cap_events_foreground():
+    """events.jsonl is consumed only by the background daemon's offset reader;
+    in foreground mode nothing reads it, so truncating the whole file when it
+    exceeds the cap is safe and prevents unbounded growth (BUG-08). Never raises
+    — the hook must not block the session. Background compaction is left to a
+    future offset-safe design."""
+    try:
+        from .mode import is_foreground_mode
+        ef = events_file()
+        if is_foreground_mode() and ef.exists() and ef.stat().st_size > _MAX_EVENTS_BYTES:
+            tmp = ef.with_suffix(".tmp")
+            tmp.write_bytes(b"")
+            os.replace(str(tmp), str(ef))
+    except Exception:
+        pass
+
 
 def _daemon_running() -> bool:
     """Check if the daemon process is alive via PID file."""
@@ -67,6 +86,7 @@ def _spawn_daemon():
 
 def main():
     try:
+        os.umask(0o077)  # owner-only perms for events.jsonl etc. (BUG-25)
         chronicle_dir().mkdir(parents=True, exist_ok=True)
         os.chmod(str(chronicle_dir()), 0o700)
         data = json.loads(sys.stdin.read())
@@ -78,6 +98,7 @@ def main():
         # Always log the event
         with open(events_file(), "a") as f:
             f.write(json.dumps(data, separators=(",", ":")) + "\n")
+        _cap_events_foreground()
 
         if event_name == "SessionStart":
             # Only respawn the daemon if we're in background mode. In

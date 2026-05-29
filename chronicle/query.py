@@ -34,7 +34,10 @@ def search(query: str, project: str | None = None):
     results = []
 
     for md_file in sorted(projects_dir().rglob("*.md")):
-        if project and project not in str(md_file):
+        # Filter on the project slug (the dir under projects/), not the full
+        # path — else a common substring (e.g. "projects") matches everything.
+        slug = md_file.relative_to(projects_dir()).parts[0]
+        if project and project not in slug:
             continue
 
         content = md_file.read_text()
@@ -74,7 +77,9 @@ def timeline(limit: int = 20, project: str | None = None):
 
     sessions = []
     for session_file in projects_dir().rglob("sessions/*.md"):
-        if project and project not in str(session_file):
+        # Filter on the project slug, not the full filesystem path (BUG-17).
+        slug = session_file.parent.parent.name
+        if project and project not in slug:
             continue
         content = session_file.read_text()
         # Extract date — handles both "**Date**: X" and "**Date**: X |" formats

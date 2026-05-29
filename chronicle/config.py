@@ -138,15 +138,13 @@ def project_chronicle_dir(slug: str) -> Path:
 
 def ensure_dirs(slug: str):
     d = project_chronicle_dir(slug)
-    created = not d.exists()
     d.mkdir(parents=True, exist_ok=True)
-    if created:
-        os.chmod(d, 0o700)
+    # Always re-chmod (not just on create) so a pre-existing loose-perm dir is
+    # healed to owner-only (BUG-25 defense-in-depth, alongside the entry umask).
+    os.chmod(d, 0o700)
     sessions = d / "sessions"
-    sessions_created = not sessions.exists()
     sessions.mkdir(exist_ok=True)
-    if sessions_created:
-        os.chmod(sessions, 0o700)
+    os.chmod(sessions, 0o700)
 
 
 def load_recent_titles(project_slug: str, max_entries: int = 10) -> list[str]:
