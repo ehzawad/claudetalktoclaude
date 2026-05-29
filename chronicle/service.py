@@ -9,7 +9,7 @@ Responsibilities:
 Designed to work under both macOS Tahoe (launchd) and Ubuntu 24.04 LTS
 (systemd --user). Status probes (`service_running`, `service_installed`,
 `mode_drift_warnings`) are best-effort — missing `launchctl`/`systemctl`
-degrades to "unknown" rather than raising. Install / bootstrap surfaces
+is reported as not running rather than raising. Install / bootstrap surfaces
 its failure: `install_service()` returns False when the manager rejected
 the job, and `install-daemon` rolls the config mode back so `chronicle
 doctor` doesn't lie about intent. The processing lock is the correctness
@@ -251,8 +251,8 @@ def install_service() -> bool:
     """Install and start the service on this platform. Idempotent.
 
     Returns True if the service manager accepted the job. False means
-    the file was written but bootstrap/enable failed — caller should
-    surface this to the user via `chronicle doctor`.
+    the file was written but daemon-reload, bootstrap, or enable failed —
+    caller should surface this to the user via `chronicle doctor`.
     """
     _set_last_service_error(None)
     p = platform_key()

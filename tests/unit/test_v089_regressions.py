@@ -1,4 +1,4 @@
-"""Regression coverage for the chronicle v0.8.9 reconciliation batch."""
+"""Historical v0.8.9 reconciliation regressions carried forward in 0.9.0."""
 from __future__ import annotations
 
 import configparser

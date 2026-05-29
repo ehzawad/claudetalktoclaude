@@ -95,7 +95,8 @@ class TestDaemonSpawnGating:
         from chronicle import mode
         import chronicle.hook as hook_mod
         mode.set_processing_mode("background")
-        # Reload hook so its `is_background_mode` closure picks up new config
+        # Reload hook after mode changes to keep the test isolated from
+        # previous monkeypatches/import state.
         import importlib
         importlib.reload(hook_mod)
 

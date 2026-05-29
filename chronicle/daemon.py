@@ -12,7 +12,8 @@ When background mode is active:
   have been quiet for `quiet_minutes` (default 5) before processing.
   Prevents contention with active coding sessions on the same subscription.
 - Runs a periodic scanner (default every 30 min) that queues any JSONL
-  under ~/.claude/projects/ without an existing .processed / .failed marker.
+  under ~/.claude/projects/ without a success or terminal-failure marker.
+  Retriable/non-terminal failures remain eligible.
 - Processes in parallel (default 5 workers via asyncio.Semaphore).
 - Holds ~/.chronicle/processing.lock across its batch so `chronicle process`
   can't race. Terminates in-flight claude subprocesses on shutdown.
@@ -175,9 +176,9 @@ def _extract_and_filter(event: dict, config: dict):
 
 
 async def _async_process_one(event: dict, config: dict, semaphore: asyncio.Semaphore):
-    """Process a single Stop event under the concurrency semaphore.
+    """Process one queued transcript event under the concurrency semaphore.
 
-    Returns (digest, entry) for deferred chronological writing, or None.
+    Returns _DeferredSession, (digest, entry, before_fingerprint), or None.
     """
     transcript_path = event.get("transcript_path", "")
     before_fingerprint = _transcript_fingerprint(transcript_path)
@@ -198,10 +199,12 @@ async def _async_process_one(event: dict, config: dict, semaphore: asyncio.Semap
 
 
 async def _process_batch(events: list[tuple[str, dict]], config: dict) -> list[tuple[str, dict]]:
-    """Process multiple Stop events concurrently, write in chronological order.
+    """Process queued transcript events concurrently, write chronologically.
 
     Returns (session_id, event) pairs that should be retried on the next
-    debounce cycle. Sessions that exceed max_retries are given up on.
+    debounce cycle. Sessions can become terminal via failure classification
+    or by reaching max_retries when that limit is configured; max_retries=None
+    means retriable failures continue indefinitely.
     """
     # Floor at 1: a user-edited config.json with concurrency<=0 would make
     # Semaphore(0) hang forever while holding processing.lock (which also
@@ -257,8 +260,8 @@ async def _process_batch(events: list[tuple[str, dict]], config: dict) -> list[t
             continue
 
         # Guard per-session: one write failure (ENOSPC, or a corrupt
-        # chronicle.md) must not abort the whole batch, and the daemon must
-        # record a failure marker so it doesn't re-summarize forever (BUG-12).
+        # chronicle.md) must not abort the whole batch. Record marker state so
+        # attempts are tracked and can promote terminal when max_retries is set.
         try:
             write_chronicle(entry, digest, max_retries=max_retries)
         except Exception as e:
@@ -418,7 +421,7 @@ def _is_running() -> tuple[bool, int | None]:
 
 
 def _scan_for_unprocessed(pending_sessions: dict, config: dict) -> int:
-    """Scan ~/.claude/projects/ for sessions with no events that aren't chronicled.
+    """Scan ~/.claude/projects/ for non-terminal sessions that need processing.
 
     Adds synthetic events for discovered sessions so the normal debounce +
     processing pipeline handles them. Returns count of newly queued sessions.
@@ -481,7 +484,8 @@ async def run_daemon_async():
     - Honors processing_mode=foreground by idling (not exiting) if a
       stale service manager keeps respawning us.
     - Acquires the singleton fcntl lock; exits with diagnostic on failure.
-    - Reads events, scans for un-evented sessions, debounces 5 minutes,
+    - Reads events, scans for non-terminal sessions missed by events,
+      debounces 5 minutes,
       then processes under the processing lock so `chronicle process`
       never races us.
     - On SIGTERM/SIGINT/SIGHUP: sets stop_event, terminates in-flight

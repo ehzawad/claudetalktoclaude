@@ -2,7 +2,7 @@
 
 Covers:
 - claude error classification: structured-output / context failures are
-  terminal kinds; everything else is retriable transient.
+  terminal kinds; generic errors are transient and bad JSON is retriable parse.
 - digest_to_text imposes NO size cap by default (whole session summarized).
 - spawn_claude refuses prompts over claude -p's 10 MiB stdin cap with a
   terminal CONTEXT error instead of spawning a doomed (and, with unlimited

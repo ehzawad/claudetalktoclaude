@@ -4,9 +4,8 @@ These cover bugs in the rendering/control flow that pure uninstall_hooks
 tests can't catch. Each test monkeypatches HOME + sys.argv, calls
 uninstall_install() directly, and inspects stdout/stderr.
 
-Why in-process, not subprocess: we need to exercise the module code that
-was just modified; a subprocess test would require rebuilding the
-PyInstaller binary on every run.
+Why in-process, not subprocess: these tests monkeypatch service probes and
+directly inspect the lifecycle helper without needing a packaged binary.
 """
 from __future__ import annotations
 
@@ -32,8 +31,8 @@ def fake_home(tmp_path, monkeypatch):
     import chronicle.config
     importlib.reload(chronicle.config)
 
-    # _service.service_installed() checks a module-level path computed at
-    # import time against the real HOME — bypass it for uninstall tests.
+    # Service paths can be import-time values; bypass service-manager state
+    # for uninstall tests.
     monkeypatch.setattr("chronicle.service.service_installed", lambda: False)
     monkeypatch.setattr("chronicle.service.service_file_path", lambda: None)
 

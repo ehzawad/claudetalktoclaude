@@ -1,7 +1,8 @@
 """Paths, constants, and configuration for the Decision Chronicle system.
 
-Path helpers are LAZY functions — each call re-resolves `Path.home()` so
-tests that monkeypatch HOME see fresh paths without importlib.reload.
+Path helpers are LAZY functions — each call re-resolves `Path.home()` and
+the relevant environment overrides (notably CHRONICLE_HOME) so tests that
+monkeypatch HOME or env vars see fresh paths without importlib.reload.
 
 The old module-level CONSTANT style (e.g. `CHRONICLE_DIR = Path.home() / ...`)
 was evaluated once at import time, which made tests dependent on when
@@ -50,7 +51,7 @@ def pid_file() -> Path:
 
 
 def processing_lock_path() -> Path:
-    """~/.chronicle/processing.lock — fcntl mutex between daemon and batch.
+    """CHRONICLE_HOME/processing.lock — fcntl mutex between daemon and batch.
     Named *_path to avoid colliding with the context manager of the same
     stem in chronicle.locks."""
     return chronicle_dir() / "processing.lock"
@@ -105,7 +106,7 @@ DEFAULT_CONFIG = {
 def load_config() -> dict:
     """Return the merged config dict. Never raises.
 
-    If ~/.chronicle/config.json is malformed (invalid JSON, permission
+    If config_file() is malformed (invalid JSON, permission
     denied, etc.), fall back to DEFAULT_CONFIG with a `_load_error` key
     so `chronicle doctor` can surface the problem without the hook /
     daemon / batch crashing on every invocation.

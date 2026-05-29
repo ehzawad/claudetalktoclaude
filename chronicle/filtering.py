@@ -19,7 +19,7 @@ def should_skip(digest, config: dict, *, force: bool = False,
 
     Reason strings:
       - "chronicle self-session" — summarizer calling itself (infinite-loop guard)
-      - "project in skip list"   — config.skip_projects match
+      - "project in skip list"   — config.skip_projects substring match on slug
       - "already chronicled"     — success marker present (bypass with force)
       - "terminal failure"       — failure marker w/ terminal=true (bypass with retry_failed or force)
       - None                     — process this session

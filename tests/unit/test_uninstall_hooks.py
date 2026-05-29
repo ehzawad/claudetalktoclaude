@@ -1,4 +1,4 @@
-"""Unit tests for chronicle.install_hooks.uninstall_hooks().
+"""Unit tests for chronicle install/uninstall hook merging.
 
 The uninstall path MUST be subtractive at the hook-entry level (not the
 matcher-group level) so a user who added their own hook into a matcher

@@ -9,6 +9,7 @@ Usage:
         Summarize pending sessions. --retry-failed retries terminal failures
         after the underlying issue has been fixed. --force reprocesses
         already-successful sessions.
+        `chronicle batch` is a compatibility alias for `chronicle process`.
 
     chronicle query projects
         Per-project counts: processed / pending / terminal-failed.
@@ -34,7 +35,8 @@ Usage:
         drift warnings, counts. --json emits a schema-versioned document
         (top-level `ok: bool`, `schema_version: 1`) for CI health checks.
         If the runtime binary exists but your shell cannot find `chronicle`,
-        verify `~/.local/bin/chronicle` still points at `~/.chronicle/runtime/chronicle`.
+        verify `~/.local/bin/chronicle` still points at the runtime binary
+        under CHRONICLE_HOME (default: `~/.chronicle/runtime/chronicle`).
 
     chronicle install-daemon
         Switch to background mode: install & start launchd/systemd service.
@@ -54,15 +56,16 @@ Usage:
     chronicle uninstall [--purge] [--yes] [--dry-run]
         Remove chronicle from this machine. Stops/removes the daemon,
         strips chronicle-hook entries from ~/.claude/settings.json, and
-        removes ~/.local/bin/chronicle{,-hook} + ~/.chronicle/runtime/.
-        Preserves user data at ~/.chronicle/ (events.jsonl, config.json,
+        removes Chronicle-owned ~/.local/bin/chronicle{,-hook} symlinks
+        + CHRONICLE_HOME/runtime/. Preserves user data at CHRONICLE_HOME
+        (default: ~/.chronicle; events.jsonl, config.json,
         .processed/, .failed/). Pass --purge to delete that too (prompts
         unless --yes). --dry-run shows the plan without executing.
     chronicle install-hooks [settings-path]
         Install chronicle hooks into Claude Code's settings.json. Defaults to
         ~/.claude/settings.json. Called by install.sh; safe to re-run.
 
-    chronicle --version
+    chronicle --version | -V
 """
 
 import os
@@ -232,14 +235,16 @@ def uninstall_install():
     """Remove chronicle from this machine.
 
     Default: stop daemon, remove service file, strip chronicle-hook entries
-    from ~/.claude/settings.json, remove ~/.local/bin/chronicle{,-hook}
-    symlinks and ~/.chronicle/runtime/. Preserves user data.
+    from ~/.claude/settings.json, remove Chronicle-owned
+    ~/.local/bin/chronicle{,-hook} symlinks and CHRONICLE_HOME/runtime/.
+    Preserves user data.
 
     --purge: additionally rm -rf ~/.chronicle (events.jsonl, config, logs,
     processed/, failed/). Prompts for confirmation unless --yes.
 
     IMPORTANT: we import every chronicle.* dependency up-front. After we
-    delete ~/.chronicle/runtime/, the PyInstaller --onedir bootstrap can no
+    delete CHRONICLE_HOME/runtime/ (default: ~/.chronicle/runtime/), the
+    PyInstaller --onedir bootstrap can no
     longer late-load modules — subsequent imports would crash the process
     mid-uninstall. Resolve everything while the runtime is still live.
     """

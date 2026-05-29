@@ -93,7 +93,8 @@ async def test_batch_passes_config_max_retries_to_write_chronicle(
     monkeypatch.setattr(batch, "write_chronicle", fake_write)
     # should_skip → process the session
     monkeypatch.setattr(batch, "should_skip", lambda *a, **kw: None)
-    # Skip rebuild_prompts_section and project_chronicle_dir — they touch the fs
+    # Skip rebuild_prompts_section; full path rendering is avoided because
+    # process_count stays zero for this fake error entry.
     monkeypatch.setattr(batch, "rebuild_prompts_section", lambda slug: None)
 
     await batch.async_batch_process(workers=1)

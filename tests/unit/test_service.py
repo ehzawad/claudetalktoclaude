@@ -1,9 +1,8 @@
-"""Unit tests for chronicle.service.mode_drift_warnings.
+"""Unit tests for chronicle.service lifecycle helpers.
 
-Pure decision logic: given (mode, service_installed, service_running),
-return the right set of human-readable warning strings. We monkeypatch
-the three state-sensors so these tests don't touch launchctl/systemctl
-or the filesystem.
+Most tests cover pure mode-drift decision logic by monkeypatching state
+sensors; the file also checks binary resolution errors and service install
+error recording without touching the real service manager.
 """
 from __future__ import annotations
 

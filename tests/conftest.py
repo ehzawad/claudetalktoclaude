@@ -2,10 +2,10 @@
 
 Three isolation styles:
 - `tmp_home` — isolated HOME only (for tests that don't import chronicle modules
-  at the module level OR that monkeypatch module constants directly).
+  at the module level OR that monkeypatch module state directly).
 - `chronicle_env` — isolated HOME + reloads chronicle.{config, storage, mode, ...}
-  so their module-level `Path.home() / ".chronicle"` constants pick up the
-  temp HOME. Use this when tests need to exercise the real marker layer.
+  so import-time service paths and module caches pick up the temp HOME. Use
+  this when tests need to exercise the real marker layer.
 - `isolated_env` — builds an env dict suitable for subprocess-based functional
   tests (functional/ dir). PATH contains a fake `claude` stub.
 
@@ -101,8 +101,8 @@ def _install_fake_claude(bin_dir: Path) -> Path:
 
 # ---------- Fixtures ----------
 
-# Modules whose path constants are computed at import from Path.home().
-# Reloading them inside chronicle_env picks up the fake HOME.
+# Modules with import-time paths or process-local caches. Reloading/resetting
+# them inside chronicle_env picks up the fake HOME.
 _RELOADABLE_MODULES = (
     "chronicle.config",
     "chronicle.mode",
@@ -119,7 +119,7 @@ _RELOADABLE_MODULES = (
 
 
 def _reload_chronicle_modules(*names: str) -> None:
-    """Reload chronicle submodules so module-level `Path.home()` constants
+    """Reload chronicle submodules so import-time paths/module state
     re-resolve against the currently active HOME. Safe to call multiple times.
     """
     for name in names:

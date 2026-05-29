@@ -65,7 +65,7 @@ def test_idempotent_reinstall_doesnt_duplicate_hooks(tmp_path):
     install_hooks(str(settings))  # run again
     data = json.loads(settings.read_text())
     for event in ("SessionStart", "Stop", "UserPromptSubmit", "SessionEnd"):
-        # Each event should have exactly ONE chronicle-hook matcher group
+        # Each event should have exactly ONE chronicle-hook command entry.
         groups = data["hooks"][event]
         chronicle_count = sum(
             1 for g in groups

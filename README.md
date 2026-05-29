@@ -20,7 +20,7 @@ curl -fsSL https://raw.githubusercontent.com/ehzawad/claudetalktoclaude/main/ins
 curl -fsSL https://raw.githubusercontent.com/ehzawad/claudetalktoclaude/main/install.sh | bash && chronicle install-daemon
 ```
 
-Pin a specific release: `CHRONICLE_VERSION=vX.Y.Z curl ... | bash`. Upgrade: `chronicle update`.
+Pin a specific release: `CHRONICLE_VERSION=vX.Y.Z curl ... | bash`. For mirrors or isolated tests, `CHRONICLE_BASE_URL` overrides the release host and `CHRONICLE_HOME` moves Chronicle's data/runtime root. Upgrade: `chronicle update`.
 
 Restart Claude Code to activate hooks. Then:
 
@@ -60,17 +60,17 @@ flowchart TB
     URLS --> DL["download chronicle-$TARGET.tar.gz<br/>+ chronicle-$TARGET.tar.gz.sha256"]
     DL --> VERIFY{"SHA256 match?"}
     VERIFY -->|no| ABORT([abort — no files touched])
-    VERIFY -->|yes| STOPD["if daemon running,<br/>send SIGTERM before<br/>overwriting binary"]
+    VERIFY -->|yes| STOPD["if daemon running,<br/>launchctl bootout /<br/>systemctl stop<br/>(fallback SIGTERM only<br/>for unmanaged daemon)"]
     STOPD --> LEGACY{"legacy<br/>~/.chronicle/src ?"}
     LEGACY -->|yes| WIPE["rm -rf legacy<br/>source-tree install<br/>(pre-v0.8.0)"]
-    LEGACY -->|no| SWAP
-    WIPE --> SWAP["atomic swap:<br/>runtime.new &rarr; runtime<br/>runtime &rarr; runtime.old &rarr; rm"]
-    SWAP --> QUAR["macOS: xattr -dr<br/>com.apple.quarantine<br/>(skip Gatekeeper kill)"]
-    QUAR --> LINK["symlink<br/>~/.local/bin/chronicle{,-hook}<br/>&rarr; runtime/chronicle"]
-    LINK --> HOOKS["chronicle install-hooks<br/>(merge into ~/.claude/settings.json)"]
-    HOOKS --> CHMOD["chmod 700 ~/.chronicle/"]
+    LEGACY -->|no| QUAR
+    WIPE --> QUAR["macOS: xattr -dr<br/>com.apple.quarantine<br/>(skip Gatekeeper kill)"]
+    QUAR --> HOOKS["validate new runtime:<br/>chronicle install-hooks<br/>(merge into ~/.claude/settings.json)"]
+    HOOKS --> SWAP["atomic swap:<br/>runtime.new &rarr; runtime<br/>runtime &rarr; runtime.old &rarr; rm"]
+    SWAP --> LINK["symlink<br/>~/.local/bin/chronicle{,-hook}<br/>&rarr; runtime/chronicle"]
+    LINK --> CHMOD["chmod 700 ~/.chronicle/"]
     CHMOD --> BG{"mode ==<br/>background<br/>(from config) ?"}
-    BG -->|yes| KICK["launchctl kickstart /<br/>systemctl restart<br/>(new binary hot)"]
+    BG -->|yes| KICK["launchctl bootstrap /<br/>systemctl start<br/>(new binary hot)"]
     BG -->|no| DONE
     KICK --> DONE([restart Claude Code])
 
@@ -135,15 +135,19 @@ flowchart LR
 
 ```bash
 chronicle query projects              # per-project OK / Pend / Fail counts
-chronicle query timeline              # recent sessions across all projects
-chronicle query sessions              # current project's chronicle
-chronicle query search "auth"         # full-text across all chronicles
+chronicle query timeline --limit 20    # recent sessions across all projects
+chronicle query timeline --project api # recent sessions matching a slug
+chronicle query sessions [PATH]        # current or named project's chronicle
+chronicle query search "auth"          # full-text across all chronicles
+chronicle query search "auth" --project api
+chronicle query <project-name>         # shortcut: show matching project
 ```
 
 ### Process (summarize sessions)
 
 ```bash
 chronicle process --workers 5                  # pending sessions
+chronicle batch --workers 5                    # alias for process
 chronicle process --project slug               # substring match against slug
 chronicle process --force --workers 5          # reprocess successes
 chronicle process --retry-failed --workers 5   # retry terminal failures
@@ -158,6 +162,7 @@ chronicle rewind <N>                  # show session #N
 chronicle rewind --since <N>          # sessions #N through latest
 chronicle rewind --diff <N>           # what was NEW in session #N
 chronicle rewind --summary <N>        # AI-summarize #N onward (calls claude -p)
+chronicle rewind --project NAME       # target a specific project slug match
 chronicle rewind --delete <N>         # remove one session's records
 chronicle rewind --prune              # delete sessions with 0 decisions
 chronicle insight [project]           # HTML dashboard (calls claude -p)
@@ -175,6 +180,8 @@ chronicle update                      # fetch + install the latest release, rest
 chronicle uninstall                   # remove binary + hooks + daemon; preserve ~/.chronicle data
 chronicle uninstall --purge --yes     # also delete ~/.chronicle (events.jsonl, config, logs)
 chronicle uninstall --dry-run         # print what would be removed without executing
+chronicle install-hooks [settings]     # merge hooks into Claude Code settings
+chronicle daemon [--bg|--stop|--status] # raw/manual daemon control
 chronicle --version
 ```
 
@@ -186,7 +193,7 @@ chronicle --version
 
 **Session** — one conversation with Claude Code. Stored as `~/.claude/projects/<slug>/<session-id>.jsonl`.
 
-**Project slug** — the working directory with `/` replaced by `-`. For example `/Users/alice/my-api` → `-Users-alice-my-api`.
+**Project slug** — Claude Code's project directory name. Chronicle prefers the transcript file's parent directory when available; otherwise it replaces every non-alphanumeric character in the working directory with `-` without collapsing runs. For example `/Users/alice/.config/my_api` → `-Users-alice--config-my-api`.
 
 **Substring project matching** — `--project <name>` matches any slug containing `<name>`. So `--project my-api` finds `-Users-alice-my-api`. See all your slugs: `chronicle query projects`.
 
@@ -196,7 +203,7 @@ chronicle --version
 
 ## Hook dispatch
 
-Every Claude Code event fires `chronicle-hook` (the same binary, dispatched by `argv[0]` via `_entrypoint.py`). Every event always appends a line to `events.jsonl`; only `SessionStart` does anything extra.
+The configured Claude Code hook events (`SessionStart`, `UserPromptSubmit`, `Stop`, and `SessionEnd`) fire `chronicle-hook` (the same binary, dispatched by `argv[0]` via `_entrypoint.py`). Every configured event appends a line to `events.jsonl`; only `SessionStart` does anything extra.
 
 ```mermaid
 flowchart TB
@@ -211,7 +218,7 @@ flowchart TB
 
     subgraph SS_CTX["SessionStart: inject past-session context"]
         direction TB
-        LOAD["slug = cwd.replace('/', '-')<br/>load_recent_titles(slug, max=10)"]
+        LOAD["slug = project_slug_for(cwd,<br/>transcript_path)<br/>load_recent_titles(slug, max=10)"]
         HAS{"titles ?"}
         EMIT["print JSON on stdout:<br/>hookSpecificOutput.additionalContext<br/>= 'Previous sessions: …'"]
         NOEMIT["no stdout<br/>(no empty-context noise)"]
@@ -223,7 +230,7 @@ flowchart TB
     subgraph SS_DAEMON["SessionStart: self-heal daemon (bg mode only)"]
         direction TB
         BG{"processing_mode<br/>== background ?"}
-        ALIVE{"_daemon_running()<br/>via pid file + kill(pid, 0) ?"}
+        ALIVE{"_daemon_running()<br/>via daemon.pid flock<br/>authoritative probe ?"}
         RESP["_spawn_daemon()<br/>argv = _spawn_daemon_cmd()<br/>• frozen → [chronicle, daemon]<br/>• dev    → [python, -m, chronicle.daemon]"]
         NOOP["skip"]
         FG["NEVER spawn —<br/>foreground = zero<br/>passive token burn"]
@@ -268,7 +275,7 @@ flowchart TB
     subgraph pipeline["claude_cli.spawn_claude"]
         RESOLVE["resolve claude binary<br/>(shutil.which + fallback dirs)"]
         ENV["strip ANTHROPIC_API_KEY /<br/>AUTH_TOKEN / BASE_URL"]
-        SPAWN["claude -p --json-schema<br/>(model/effort/fallback = claude defaults<br/>unless set in config; no timeout)"]
+        SPAWN["claude -p --output-format json<br/>--no-session-persistence<br/>(--json-schema for session summaries;<br/>model/effort/fallback unset unless configured;<br/>no timeout)"]
         CLASSIFY["classify result:<br/>INFRA / TRANSIENT / PARSE /<br/>CONTEXT / STRUCTURED_OUTPUT"]
     end
 
@@ -292,9 +299,9 @@ flowchart TB
 
 **Five-step invariant** on every summarization (foreground or background):
 
-1. Extract the session JSONL **in full** (no size cap), redact secrets (API keys, tokens, JWTs, connection URIs, `.env`/`.pem`/`.key` contents).
+1. Extract the session JSONL **in full** (no Chronicle size cap), redact secrets (API keys, tokens, JWTs, connection URIs, `.env`/`.pem`/`.key` contents).
 2. Resolve the `claude` binary; build a subprocess env with auth-routing vars stripped.
-3. Invoke `claude -p` under the processing lock (`~/.chronicle/processing.lock`) with **no wall-clock timeout** — it runs as long as claude needs and stays Ctrl-C/SIGTERM interruptible.
+3. Invoke `claude -p` under the processing lock (`~/.chronicle/processing.lock`) with **no wall-clock timeout** — it runs as long as claude needs and stays Ctrl-C/SIGTERM interruptible. Prompts above the Claude CLI's 10 MiB stdin cap are classified as terminal context failures before spawning.
 4. Classify the outcome: success / transient / parse / infra / context / structured_output.
 5. Write `.processed/` (success) or `.failed/` (transient → terminal after `max_retries`; context/structured_output → terminal immediately).
 
@@ -415,6 +422,8 @@ Each project gets up to three views:
 
 ### Where things live
 
+Default paths below use `~/.chronicle/`; set `CHRONICLE_HOME` to move Chronicle's state and runtime root.
+
 ```
 ~/.claude/projects/<slug>/*.jsonl       # Claude Code session transcripts (source)
 
@@ -441,7 +450,7 @@ Each project gets up to three views:
 
 ### What gets captured in session `.md`
 
-Turn-by-turn log · decisions with status + rationale + alternatives · problems solved (symptom/diagnosis/fix/verification) · developer reasoning moments · follow-up questions · architecture patterns · planning evolution · technical details (stack, errors, commands, config) · per-session cost.
+Turn-by-turn log · decisions with status + rationale + alternatives · problems solved (symptom/diagnosis/fix/verification) · developer reasoning moments · follow-up questions · architecture patterns · planning evolution · technical details (stack, errors, commands, config) · notable activity for Agent Teams/tasks/workflows/MCP/new tools · tags and unknown structured extras · per-session cost.
 
 ---
 
@@ -460,13 +469,13 @@ Turn-by-turn log · decisions with status + rationale + alternatives · problems
 | `concurrency` | `5` | background | Parallel workers in the daemon. (`chronicle process --workers` overrides for that invocation.) |
 | `poll_interval_seconds` | `5` | background | Daemon event-journal poll cadence. |
 | `quiet_minutes` | `5` | background | Debounce — minutes of silence before daemon processes. |
-| `scan_interval_minutes` | `30` | background | How often the daemon scans for un-evented sessions. |
+| `scan_interval_minutes` | `30` | background | How often the daemon scans for non-terminal sessions missed by hook events. |
 
 ---
 
 ## Security
 
-- **Secret redaction.** All tool outputs pass through a pattern scanner before any markdown is written. API keys (`sk-`, `ghp_`, `AKIA`, `xoxb-`), auth headers (`Bearer …`), private keys (`-----BEGIN …`), JWTs (`eyJ…`), connection URIs (`postgres://user:pass@…`), and env-var assignments (`API_KEY=…`, `SECRET=…`) are replaced with `[REDACTED]`. `.env`, `.pem`, and `.key` file content is fully redacted.
+- **Secret redaction.** User/assistant prose, tool commands, selected tool inputs, tool outputs, and summarization error messages pass through a pattern scanner before any markdown or marker detail is written. API keys (`sk-`, `ghp_`, `AKIA`, `xoxb-`), auth headers (`Bearer …`), private keys (`-----BEGIN …`), JWTs (`eyJ…`), connection URIs (`postgres://user:pass@…`), and env-var assignments (`API_KEY=…`, `SECRET=…`) are replaced with `[REDACTED]`. `.env`, `.pem`, and `.key` file content is fully redacted.
 - **Subscription routing.** Every `claude -p` subprocess call strips `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_BASE_URL` from the environment — summarization always routes through your Claude.ai subscription, never API credits or a proxy gateway ([anthropics/claude-code#2051](https://github.com/anthropics/claude-code/issues/2051)).
 - **File permissions.** `~/.chronicle/` is `0700` (owner-only), matching `~/.claude/`.
 - **Observer-only at runtime.** Chronicle never writes to `~/.claude/projects/` (the session transcripts), never blocks a hook, never modifies Claude Code behavior. The only effect on an active session is the `additionalContext` injection of past session titles on SessionStart. All deletion operations (`rewind --delete`, `--prune`) only touch chronicle's own markdown and markers — the original JSONL in `~/.claude/projects/` stays. Install / uninstall are the one exception: `install-hooks` and `uninstall` do edit `~/.claude/settings.json` to add or remove the `chronicle-hook` entries, and they preserve any unrelated hook entries already there.
@@ -481,7 +490,8 @@ Run `chronicle doctor` first. It reports:
 - Effective PATH
 - Current mode + daemon status + service drift warnings
 - Processing lock state
-- Per-project processed / pending / terminal-failure counts
+- Aggregate processed / pending / terminal-failure counts and marker totals
+- Integration state for symlinks, runtime binary, and hook entries
 
 Common fixes:
 

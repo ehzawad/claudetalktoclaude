@@ -8,8 +8,9 @@ Solves three cross-cutting concerns:
    always wins over API-key or proxy-gateway routing
    (anthropics/claude-code#2051).
 3. Error classification — distinguishes INFRA (missing binary, perm
-   denied, auth failure) from TRANSIENT (timeout, claude's own is_error)
-   from PARSE (bad JSON). Retry accounting only penalizes non-INFRA.
+   denied, auth failure), TRANSIENT/PARSE retriable failures, and
+   deterministic CONTEXT/STRUCTURED_OUTPUT terminal failures. Retry
+   accounting only penalizes non-INFRA.
 
 Also maintains a registry of in-flight subprocesses so daemon shutdown
 can terminate them instead of orphaning them.
@@ -111,7 +112,7 @@ def resolve_claude_binary(force_refresh: bool = False) -> Path:
     """Return the absolute path to `claude`. Raises ClaudeNotFound if absent.
 
     Searches os.environ["PATH"] (via shutil.which), then curated fallback
-    dirs. Caches the hit for the process lifetime.
+    dirs. Caches the hit while it still exists; force_refresh bypasses cache.
     """
     global _cached_claude_path
     if _cached_claude_path is not None and not force_refresh:
@@ -185,7 +186,7 @@ async def terminate_active_subprocesses(grace_seconds: float = 5.0) -> dict:
     """Terminate all in-flight claude subprocesses. Called on daemon shutdown.
 
     Sends SIGTERM, waits up to grace_seconds, then SIGKILL stragglers.
-    Always reaps via wait() after kill to avoid zombies.
+    Reaps via wait() after kill on a best-effort timeout to avoid zombies.
     Returns {"terminated": N, "killed": M} for logging.
     """
     if not _active_procs:

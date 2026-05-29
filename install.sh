@@ -153,7 +153,7 @@ fi
 
 # Remove the old source-tree install (venv + shell wrappers + git clone).
 # The binary doesn't need any of it. Keep user data under $CHRONICLE_HOME,
-# just nuke the managed .src dir if it's there.
+# just nuke the managed src dir if it's there.
 if [ -d "$CHRONICLE_HOME/src" ]; then
     echo "Removing legacy source-tree install at $CHRONICLE_HOME/src..."
     rm -rf "$CHRONICLE_HOME/src"
@@ -193,7 +193,8 @@ rm -rf "$CHRONICLE_HOME/runtime.old"
 
 # Old symlinks / wrapper scripts from earlier layouts.
 rm -f "$BIN_DIR/chronicle" "$BIN_DIR/chronicle-hook"
-# Relative symlinks so the install layout stays portable if $HOME moves.
+# Main command points at the active runtime; hook command is a local relative
+# symlink to the same binary.
 ln -sf "$RUNTIME_DIR/chronicle" "$BIN_DIR/chronicle"
 ln -sf "chronicle" "$BIN_DIR/chronicle-hook"
 

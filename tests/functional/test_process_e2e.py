@@ -3,9 +3,8 @@
 Exercises the full pipeline — session JSONL → claude -p subprocess → .md
 and marker state — with a fake `claude` binary on PATH. No real LLM calls.
 
-Each test runs `chronicle process --dry-run` or full `process` via
-subprocess with a fully isolated HOME + PATH, so we can observe the same
-behavior a user would see.
+Each test runs full `chronicle process` via subprocess with a fully isolated
+HOME + PATH, so we can observe the same behavior a user would see.
 """
 from __future__ import annotations
 
@@ -105,7 +104,7 @@ class TestForegroundHappyPath:
 class TestInfraErrorDoesNotConsumeRetries:
     def test_missing_claude_does_not_mark_terminal(self, fake_env):
         home, bin_dir = fake_env
-        # Empty PATH → no claude binary
+        # Empty fake bin dir plus only system dirs on PATH -> no claude binary.
         empty_bin = bin_dir.parent / "empty_bin"
         empty_bin.mkdir()
         slug = "-tmp-infra"

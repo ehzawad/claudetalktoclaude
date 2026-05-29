@@ -1,12 +1,12 @@
 """Session summarization via the Claude CLI.
 
 Builds a SESSION prompt from the extracted transcript and invokes
-`claude -p --json-schema` via chronicle.claude_cli.spawn_claude (which
-handles binary resolution, env sanitization, subprocess registry, and
-error classification).
+`claude -p` with structured output via chronicle.claude_cli.spawn_claude
+(which handles binary resolution, env sanitization, subprocess registry,
+and error classification).
 
-Uses --effort max for thorough reasoning and --fallback-model for
-resilience when the primary model is overloaded.
+Model, effort, and fallback_model are config-driven. When unset, Chronicle
+omits those flags so `claude -p` uses its own current defaults.
 
 Provides `async_summarize_session()` for parallel processing.
 """
@@ -226,7 +226,7 @@ class ChronicleEntry:
     error_message: str = ""
     total_turns: int = 0
     tool_actions: list = field(default_factory=list)
-    turn_log: str = ""  # one-liner-per-turn chronological log
+    turn_log: str = ""  # multi-line chronological archival log
     total_cost_usd: float = 0.0
 
 
@@ -261,7 +261,7 @@ def _as_dict(v):
 
 
 def _populate_entry_from_structured(data: dict, entry: ChronicleEntry) -> ChronicleEntry:
-    """Fill a ChronicleEntry from a validated structured_output dict."""
+    """Fill a ChronicleEntry from structured_output or parsed result JSON."""
     if data.get("is_empty"):
         entry.is_empty = True
         entry.title = data.get("title", f"Session {entry.session_id[:8]}")

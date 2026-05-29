@@ -4,7 +4,7 @@ Verifies:
 - collect_diagnostics returns a fully-serializable dict with stable keys
 - `chronicle doctor --json` emits valid JSON with those keys
 - `chronicle doctor` (text) still prints a readable report
-- exit code semantics (0 if no drift, 1 if drift)
+- exit code semantics (0 when diagnostics ok, 1 when drift/missing claude/config error)
 """
 from __future__ import annotations
 
@@ -80,7 +80,7 @@ def test_run_text_mode_prints_human_report(isolated_doctor, capsys):
 
 
 def test_run_exit_code_one_on_drift(isolated_doctor, monkeypatch, capsys):
-    """Drift warning → exit code 1, in both text and JSON."""
+    """Drift warning contributes to diagnostics not-ok in text and JSON."""
     from chronicle import doctor, mode, service
     mode.set_processing_mode("background")
     # Force drift: config says background but service file absent
@@ -108,5 +108,4 @@ def test_collect_diagnostics_warns_on_runtime_without_symlink(isolated_doctor):
     )
     assert data["integration"]["runtime_exists"] is True
     assert data["integration"]["chronicle_exists"] is False
-
 

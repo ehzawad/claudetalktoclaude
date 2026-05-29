@@ -1,7 +1,8 @@
 """Generate a unified project story from all chronicle sessions.
 
-Reads every session markdown file chronologically, sends the full content
-to Claude for synthesis into a single cohesive narrative. The output is a
+Reads every session markdown file chronologically, removes noisy archival
+sections where possible, and sends the resulting session extracts to Claude
+for synthesis into a single cohesive narrative. The output is a
 stakeholder-readable markdown document covering the entire project arc:
 architecture, decisions, problems solved, evolution over time.
 
@@ -42,7 +43,8 @@ def _load_session_content(project_dir: Path) -> list[tuple[str, str]]:
     pairs = []
     for md_file in sorted(sessions_dir.glob("*.md")):
         content = md_file.read_text(errors="ignore")
-        # Strip the turn-by-turn log and verbatim prompts — too noisy for synthesis
+        # Strip older triple-fenced turn logs and verbatim prompts — too noisy
+        # for synthesis. Current four-fenced archival logs are retained.
         content = re.sub(
             r"## Turn-by-turn log\n\n```.*?```\n\n",
             "", content, flags=re.DOTALL
@@ -57,7 +59,7 @@ def _load_session_content(project_dir: Path) -> list[tuple[str, str]]:
 
 STORY_PROMPT = """\
 You are writing a unified engineering story for a software project. You will receive \
-the full content of every chronicle session in chronological order. Your job is to \
+chronicle session extracts in chronological order. Your job is to \
 synthesize them into a single, cohesive markdown document that a technical lead or \
 CTO can read to understand the entire project: what was built, how it evolved, every \
 significant decision, every problem encountered and solved, the architecture, and \
@@ -86,7 +88,7 @@ maintain the complete timeline.
 
 Return ONLY the markdown document. No fences wrapping it. Start with a # heading.
 
-CHRONICLE SESSIONS (chronological):
+CHRONICLE SESSION EXTRACTS (chronological):
 
 {sessions}
 """

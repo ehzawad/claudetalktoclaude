@@ -7,7 +7,7 @@ A silent regression here would leak secrets into the chronicle.
 Also covers:
 - JSONL parsing (user/assistant/tool_result timeline construction)
 - Tool-use extraction (Bash/Edit/Write/Read/Agent/MCP)
-- Tool result truncation at 10KB
+- Uncapped tool-result capture with redaction
 - User-prompt filtering (skip system-injected tags)
 - Sensitive file-path full-redaction (.env / .pem / .key)
 - System XML stripping that preserves user-typed HTML

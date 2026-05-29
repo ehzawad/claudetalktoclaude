@@ -31,7 +31,11 @@ from .storage import is_succeeded, is_terminal_failure, list_failed
 
 
 def _count_sessions() -> dict:
-    """Return counts of processed_ok / terminal_failure / unprocessed JSONLs."""
+    """Return processed_ok / terminal_failure / unprocessed source JSONL counts.
+
+    `unprocessed` means neither succeeded nor terminal-failed, so retryable
+    failures are included. Paths containing "subagents" are skipped.
+    """
     ok = 0
     term = 0
     pending = 0
@@ -53,6 +57,11 @@ def _count_sessions() -> dict:
 
 
 def _hook_install_status() -> tuple[int | None, str | None, str]:
+    """Return (hook_count, warning, settings_path).
+
+    hook_count is None when settings.json is unreadable or structurally invalid;
+    warning then explains why. A missing settings file reports count 0.
+    """
     settings_path = Path.home() / ".claude" / "settings.json"
     if not settings_path.exists():
         return 0, None, str(settings_path)

@@ -92,7 +92,7 @@ def test_corrupt_chronicle_missing_separator_self_heals(isolated_chronicle):
     cf.write_text(content.replace(storage._TIMELINE_SEP + "\n", ""))
     assert storage._TIMELINE_END in cf.read_text()
     assert storage._TIMELINE_SEP not in cf.read_text()
-    # Must self-heal, not raise (fails on current code with ValueError).
+    # Must self-heal, not raise (failed pre-fix with ValueError).
     storage.write_chronicle(_entry("sess-2-aaaaaaaa", 2, slug),
                             _digest("sess-2-aaaaaaaa", slug), max_retries=3)
     repaired = cf.read_text()

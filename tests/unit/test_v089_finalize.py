@@ -1,4 +1,4 @@
-"""Regression tests for the v0.8.9 finalize fixes (council-flagged):
+"""Historical v0.8.9 finalize regression tests carried forward in 0.9.0:
 
   BUG-20 #4   _session_id_from_jsonl tolerates corrupt/binary jsonl (no UnicodeDecodeError)
   hook liveness   hook._daemon_running uses the flock-authoritative probe (BUG-10), not os.kill

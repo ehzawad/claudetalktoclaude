@@ -1,5 +1,5 @@
-"""End-to-end CLI suite: drive EVERY chronicle command via subprocess and
-assert it works as a user would see it.
+"""End-to-end CLI suite: drive representative chronicle commands via
+subprocess and assert they work as a user would see them.
 
 Fully hermetic: isolated HOME, a fake `claude` on PATH (no real tokens), and
 fake `launchctl`/`systemctl` for the daemon-mode round-trip (no real service
@@ -66,6 +66,7 @@ def _run(args, *, home, bin_dir, fake_mode="success", extra_env=None, cwd=None, 
     env = os.environ.copy()
     env["HOME"] = str(home)
     env["PATH"] = f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin"
+    env["PYTHONPATH"] = str(REPO_ROOT)
     env["FAKE_CLAUDE_MODE"] = fake_mode
     for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CHRONICLE_HOME"):
         env.pop(k, None)
@@ -81,7 +82,7 @@ def _hash(sid: str) -> str:
 
 def _make_installed_footprint(home: Path) -> Path:
     """Minimal on-disk install footprint so uninstall/install-daemon see a real
-    install in the isolated HOME (symlinks + runtime + a settings.json hook)."""
+    install in the isolated HOME (executables, runtime dir, settings hook)."""
     localbin = home / ".local" / "bin"
     localbin.mkdir(parents=True, exist_ok=True)
     chron = localbin / "chronicle"

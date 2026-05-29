@@ -7,6 +7,8 @@ Usage:
     chronicle rewind --summary 2        # AI-summarize sessions #2 through latest
     chronicle rewind --project NAME     # target a specific project
     chronicle rewind --diff 2           # show what was NEW in session #2
+    chronicle rewind --delete 2         # delete Chronicle's record for session #2
+    chronicle rewind --prune            # delete all 0-decision session records
 """
 
 import argparse
@@ -135,6 +137,8 @@ def show_session_list(sessions: list[dict], project_dir: Path):
     print(f"  View range:        chronicle rewind --since <N>")
     print(f"  Summarize range:   chronicle rewind --summary <N>")
     print(f"  Diff a session:    chronicle rewind --diff <N>")
+    print(f"  Delete session:    chronicle rewind --delete <N>")
+    print(f"  Prune empty:       chronicle rewind --prune")
 
 
 def show_session(session: dict):

@@ -44,7 +44,11 @@ PROGRESS_INTERVAL_SECONDS = 15
 
 
 def find_all_sessions(project_filter: str | None = None) -> list[tuple[str, Path]]:
-    """Find all session JSONL files across all projects."""
+    """Find session JSONLs, optionally substring-filtered by project slug.
+
+    Paths containing "subagents" are skipped because they are not primary
+    Claude Code session transcripts.
+    """
     if not claude_projects().exists():
         return []
 

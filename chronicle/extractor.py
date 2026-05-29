@@ -28,7 +28,11 @@ class UserPrompt:
 
 @dataclass
 class ToolDetail:
-    """Rich detail about a tool call — full inputs for the archival record."""
+    """Rich detail about a tool call for the archival record.
+
+    Some tool families store selected or truncated inputs to keep logs useful
+    without dumping bulky or sensitive payloads.
+    """
     tool: str
     summary: str  # one-liner for the LLM prompt
     path: str = ""
@@ -42,7 +46,7 @@ class ToolDetail:
 @dataclass
 class TimelineEntry:
     """A single turn in the chronological conversation timeline."""
-    role: str  # "user", "assistant", "tool_result"
+    role: str  # "user", "assistant", "tool_result", or future transcript type
     timestamp: str
     text: str  # main text content
     tool_actions: list[str] = field(default_factory=list)  # one-liners for LLM
@@ -656,7 +660,9 @@ def digest_to_text(digest: SessionDigest, max_chars: int | None = None) -> str:
 def timeline_to_log(digest: SessionDigest) -> str:
     """Generate a full chronological log from the timeline.
 
-    No truncation. Full raw content. Human-readable formatting.
+    No size truncation. Content is extracted/redacted, thinking blocks are
+    skipped, and some tool inputs may be selected/truncated. Human-readable
+    formatting.
     This is the archival record in the session markdown.
     """
     lines = []

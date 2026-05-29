@@ -6,9 +6,10 @@ Marker state layout:
       {session_id, attempts, terminal: bool, last_error_kind,
        last_error_message, last_attempt_iso}
 
-  Transient failures live in .failed/ with terminal=false and retriable.
-  Reaching max_retries flips terminal=true; skipped by default unless
-  `--retry-failed` is passed.
+  Transient/parse failures live in .failed/ with terminal=false and retriable.
+  Reaching max_retries flips terminal=true; deterministic context and
+  structured-output failures are terminal immediately. Terminal failures are
+  skipped by default unless `--retry-failed` is passed.
 
   Success clears any .failed/ entry for the session.
 
@@ -81,7 +82,7 @@ def get_failed(session_id: str) -> dict | None:
 
 
 def is_terminal_failure(session_id: str) -> bool:
-    """True iff session has been given up on (max_retries hit)."""
+    """True iff the session is in terminal failure state."""
     rec = get_failed(session_id)
     return bool(rec and rec.get("terminal"))
 
@@ -93,9 +94,10 @@ def get_attempt_count(session_id: str) -> int:
 
 def record_failed_attempt(session_id: str, *, error_kind: str,
                           error_message: str, terminal: bool) -> int:
-    """Append a failed attempt. Returns new attempts count.
+    """Update the failure record and return the new attempts count.
 
-    Pass terminal=True when max_retries has been reached.
+    Pass terminal=True when max_retries has been reached or the failure is
+    deterministic for the prompt as sent.
     """
     _ensure_dir(failed_dir())
     rec = get_failed(session_id) or {"session_id": session_id, "attempts": 0}
@@ -156,10 +158,11 @@ def session_filename(entry) -> str:
 
 
 def clear_session_markers(session_id: str):
-    """Remove all marker state (success, failed) so session can be reprocessed.
+    """Remove marker state for the exact session ID so it can be reprocessed.
 
     Tries exact hash first. If that fails (e.g. short ID vs full UUID mismatch),
-    scans .processed/ marker files by content to find the right one.
+    scans .processed/ marker files by content to find the matching full ID.
+    Failed-only short-ID lookups cannot be resolved without a success marker.
     """
     _ensure_dir(processed_dir())
     _ensure_dir(failed_dir())

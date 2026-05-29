@@ -1,11 +1,12 @@
 """Hook dispatcher for Claude Code events.
 
-Behavior is identical in foreground and background modes EXCEPT for the
-daemon-spawn step on SessionStart:
+Foreground and background modes both log configured hook events. They differ
+on SessionStart daemon spawning, and foreground mode also caps events.jsonl
+because no daemon consumes it there:
 
-- SessionStart (sync): always appends event, always injects past session
-  titles as `additionalContext`. In background mode only, respawns the
-  daemon if it's dead. In foreground mode, never spawns the daemon.
+- SessionStart (sync): always appends event, emits past session titles as
+  `additionalContext` only when titles exist. In background mode only,
+  respawns the daemon if it's dead. In foreground mode, never spawns the daemon.
 - UserPromptSubmit / Stop / SessionEnd (async): always append to
   events.jsonl and exit. Never return decisions, never block.
 
@@ -31,7 +32,7 @@ _MAX_EVENTS_BYTES = 5 * 1024 * 1024  # ~5 MiB foreground cap for events.jsonl
 
 
 def _lock_file_exclusive(f):
-    """Best-effort advisory lock used only around the single event append."""
+    """Best-effort advisory lock around event-file append/truncate operations."""
     try:
         import fcntl
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)

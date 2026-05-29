@@ -102,7 +102,7 @@ def timeline(limit: int = 20, project: str | None = None):
     for date_str, proj, title, filepath, content in sessions[:limit]:
         # Extract decisions count (### headings under Key decisions)
         decision_count = len(re.findall(r"^### ", content, re.MULTILINE))
-        # Extract summary — matches both "## Summary" section and inline summary
+        # Extract summary from the current or older section heading.
         summary_match = re.search(r"## Summary\n\n(.+?)(?:\n\n|\Z)", content, re.DOTALL)
         if not summary_match:
             summary_match = re.search(r"## What happened\n\n(.+?)(?:\n\n|\Z)", content, re.DOTALL)
@@ -252,10 +252,11 @@ def show_project(name: str):
 
 
 def list_projects():
-    """List projects with per-session breakdown: processed / pending / failed.
+    """List JSONL-backed projects with processed / pending / failed counts.
 
-    For each project slug (present under ~/.claude/projects/ or ~/.chronicle/projects/):
-      - processed: sessions with a success marker AND a session .md file
+    Slugs are discovered from both ~/.claude/projects/ and ~/.chronicle/projects/,
+    but only source JSONLs under ~/.claude/projects/ contribute counts:
+      - processed: source JSONL has a success marker
       - failed (terminal): sessions in .failed/ with terminal=true
       - pending: jsonl exists but no success marker, no terminal-failure marker
     """

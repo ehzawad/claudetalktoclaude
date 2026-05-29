@@ -152,8 +152,9 @@ def uninstall_hooks(settings_path: str, dry_run: bool = False) -> int:
     drops it too.
 
     Returns the number of chronicle-hook entries that were (or would be,
-    in dry_run mode) removed. Never raises; a malformed settings.json
-    leaves the file untouched and returns 0 with a warning to stderr.
+    in dry_run mode) removed. Malformed settings.json leaves the file
+    untouched and returns 0 with a warning to stderr. Non-dry-run write
+    failures propagate to the lifecycle command so it can report them.
     """
     p = Path(settings_path)
     if not p.exists():

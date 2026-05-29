@@ -34,7 +34,7 @@ def test_valid_config_merges_over_defaults(chronicle_env):
 
 def test_malformed_json_returns_defaults_with_error(chronicle_env):
     from chronicle import config
-    config.config_file().write_text('{"not_valid": ,}\n')  # trailing comma
+    config.config_file().write_text('{"not_valid": ,}\n')  # malformed JSON
     cfg = config.load_config()
     # Must NOT raise. Must return defaults + _load_error.
     assert cfg["processing_mode"] == "foreground"
