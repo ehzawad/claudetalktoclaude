@@ -253,9 +253,12 @@ def _remove_session_entry(content: str, session_marker: str) -> str:
     # above the marker line rather than a fixed 300-char window (BUG-21:
     # titles longer than ~295 chars fell outside the window and orphaned).
     marker_line_start = content.rfind("\n", 0, marker_idx) + 1
-    heading_line_start = content.rfind("\n", 0, marker_line_start - 1) + 1
-    if content[heading_line_start:heading_line_start + 1] == "#":
-        heading_start = heading_line_start
+    if marker_line_start > 0:
+        heading_line_start = content.rfind("\n", 0, marker_line_start - 1) + 1
+        if content[heading_line_start:heading_line_start + 1] == "#":
+            heading_start = heading_line_start
+        else:
+            heading_start = marker_idx
     else:
         heading_start = marker_idx
 

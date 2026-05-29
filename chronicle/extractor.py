@@ -65,6 +65,38 @@ class SessionDigest:
     total_turns: int = 0
 
 
+def _session_id_from_jsonl(jsonl_path: str | Path) -> str:
+    """Return the canonical sessionId stored inside a Claude JSONL.
+
+    Claude's current filenames match `sessionId`, but marker identity is based
+    on the extractor's `digest.session_id`. Keep scanner/doctor probes aligned
+    with extraction by using the last non-meta in-file sessionId, falling back
+    to the filename stem when the file is unreadable or lacks sessionId fields.
+    """
+    path = Path(jsonl_path)
+    session_id = path.stem
+    try:
+        with open(path, errors="replace") as f:  # tolerate corrupt/binary jsonl (BUG-20)
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("type") == "file-history-snapshot":
+                    continue
+                if entry.get("isMeta"):
+                    continue
+                sid = entry.get("sessionId", "")
+                if sid:
+                    session_id = sid
+    except OSError:
+        return path.stem
+    return session_id
+
+
 # Secret patterns to redact from tool outputs, commands, and file content.
 # Order matters — earlier alternations take precedence at each match position.
 # Header-style alternations (Authorization, Cookie, Proxy-Authorization,

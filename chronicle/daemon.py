@@ -44,7 +44,7 @@ from .config import (
     chronicle_dir, claude_projects, events_file, offset_file, pid_file,
     load_config, save_default_config,
 )
-from .extractor import extract_session
+from .extractor import extract_session, _session_id_from_jsonl
 from .filtering import should_skip
 from .locks import (
     acquire_daemon_lock, daemon_lock_still_valid, daemon_is_running,
@@ -53,9 +53,88 @@ from .locks import (
 from .mode import is_background_mode
 from .storage import (
     is_succeeded, is_terminal_failure, write_chronicle,
-    record_failed_attempt, get_attempt_count,
+    record_failed_attempt, get_attempt_count, clear_session_markers,
 )
 from .summarizer import async_summarize_session
+
+
+_MAX_EVENTS_BYTES = 5 * 1024 * 1024
+
+
+class _DeferredSession:
+    """Internal result: do not write a marker; retry after another quiet window."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+
+
+def _quiet_seconds(config: dict) -> float:
+    try:
+        return max(0.0, float(config.get("quiet_minutes", 5)) * 60.0)
+    except (TypeError, ValueError):
+        return 5 * 60.0
+
+
+def _transcript_fingerprint(transcript_path: str | os.PathLike | None) -> tuple[int, int] | None:
+    if not transcript_path:
+        return None
+    try:
+        st = Path(transcript_path).stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _fresh_transcript_reason(
+    transcript_path: str | os.PathLike | None,
+    config: dict,
+    *,
+    fingerprint: tuple[int, int] | None = None,
+) -> str | None:
+    quiet_seconds = _quiet_seconds(config)
+    if quiet_seconds <= 0:
+        return None
+
+    fp = fingerprint if fingerprint is not None else _transcript_fingerprint(transcript_path)
+    if fp is None:
+        return None
+
+    mtime = fp[0] / 1_000_000_000
+    age = time.time() - mtime
+    if age < quiet_seconds:
+        return "transcript modified within quiet window"
+    return None
+
+
+def _post_summary_defer_reason(
+    event: dict,
+    config: dict,
+    before_fingerprint: tuple[int, int] | None,
+) -> str | None:
+    transcript_path = event.get("transcript_path", "")
+    after_fingerprint = _transcript_fingerprint(transcript_path)
+    if before_fingerprint is not None and after_fingerprint != before_fingerprint:
+        return "transcript changed during summarization"
+    return _fresh_transcript_reason(
+        transcript_path, config, fingerprint=after_fingerprint)
+
+
+def _lock_file_exclusive(f):
+    """Best-effort advisory lock used only around append/truncate syscalls."""
+    try:
+        import fcntl
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+    except Exception:
+        return False
+    return True
+
+
+def _unlock_file(f):
+    try:
+        import fcntl
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
 
 
 def _read_offset() -> int:
@@ -100,6 +179,13 @@ async def _async_process_one(event: dict, config: dict, semaphore: asyncio.Semap
 
     Returns (digest, entry) for deferred chronological writing, or None.
     """
+    transcript_path = event.get("transcript_path", "")
+    before_fingerprint = _transcript_fingerprint(transcript_path)
+    reason = _fresh_transcript_reason(
+        transcript_path, config, fingerprint=before_fingerprint)
+    if reason:
+        return _DeferredSession(reason)
+
     digest = _extract_and_filter(event, config)
     if digest is None:
         return None
@@ -108,7 +194,7 @@ async def _async_process_one(event: dict, config: dict, semaphore: asyncio.Semap
         print(f"[chronicle] summarizing session {digest.session_id[:8]} "
               f"({digest.total_turns} turns, {len(digest.user_prompts)} prompts)...")
         entry = await async_summarize_session(digest)
-        return (digest, entry)
+        return (digest, entry, before_fingerprint)
 
 
 async def _process_batch(events: list[tuple[str, dict]], config: dict) -> list[tuple[str, dict]]:
@@ -132,7 +218,10 @@ async def _process_batch(events: list[tuple[str, dict]], config: dict) -> list[t
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    max_retries = config.get("max_retries", 3)
+    try:
+        max_retries = int(config.get("max_retries", 3))
+    except (TypeError, ValueError):
+        max_retries = 3
     pending_writes = []
     retry = []
     for (sid, ev), result in zip(events, results):
@@ -144,15 +233,28 @@ async def _process_batch(events: list[tuple[str, dict]], config: dict) -> list[t
             print(f"[chronicle] error processing {sid[:8]}: {result}",
                   file=sys.stderr)
             retry.append((sid, ev))
+        elif isinstance(result, _DeferredSession):
+            print(f"[chronicle] deferring {sid[:8]}: {result.reason}")
+            retry.append((sid, ev))
         elif result is not None:
             # Carry the ORIGINAL pending key (sid, ev) alongside the result so
             # requeue stays correct even if extract overwrote digest.session_id
             # to differ from the file stem we were queued under (BUG-20 FIX 1).
-            digest, entry = result
-            pending_writes.append((sid, ev, digest, entry))
+            if len(result) == 2:
+                digest, entry = result
+                before_fingerprint = None
+            else:
+                digest, entry, before_fingerprint = result
+            pending_writes.append((sid, ev, digest, entry, before_fingerprint))
 
     pending_writes.sort(key=lambda t: t[2].start_time)
-    for sid, ev, digest, entry in pending_writes:
+    for sid, ev, digest, entry, before_fingerprint in pending_writes:
+        defer_reason = _post_summary_defer_reason(ev, config, before_fingerprint)
+        if defer_reason:
+            print(f"[chronicle] deferring {sid[:8]}: {defer_reason}")
+            retry.append((sid, ev))
+            continue
+
         # Guard per-session: one write failure (ENOSPC, or a corrupt
         # chronicle.md) must not abort the whole batch, and the daemon must
         # record a failure marker so it doesn't re-summarize forever (BUG-12).
@@ -160,13 +262,32 @@ async def _process_batch(events: list[tuple[str, dict]], config: dict) -> list[t
             write_chronicle(entry, digest, max_retries=max_retries)
         except Exception as e:
             print(f"[chronicle] write failed for {sid[:8]}: {e}", file=sys.stderr)
-            terminal = get_attempt_count(digest.session_id) + 1 >= max_retries
-            record_failed_attempt(
-                digest.session_id, error_kind="transient",
-                error_message=f"write_chronicle: {e}", terminal=terminal,
-            )
+            try:
+                terminal = get_attempt_count(digest.session_id) + 1 >= max_retries
+                record_failed_attempt(
+                    digest.session_id, error_kind="transient",
+                    error_message=f"write_chronicle: {e}", terminal=terminal,
+                )
+            except Exception as marker_error:
+                print(f"[chronicle] failed to record write failure for "
+                      f"{sid[:8]}: {marker_error}", file=sys.stderr)
+                retry.append((sid, ev))
+                continue
             if not terminal:
                 retry.append((sid, ev))
+            continue
+        # BUG-08 race: if the transcript changed DURING write_chronicle (between
+        # the post-summary fingerprint check and mark_succeeded), the success we
+        # just finalized is stale — undo the marker and requeue so the now-newer
+        # transcript is re-summarized next cycle (never finalize an active session).
+        if (before_fingerprint is not None
+                and not entry.is_error
+                and is_succeeded(digest.session_id)
+                and _transcript_fingerprint(ev.get("transcript_path", "")) != before_fingerprint):
+            print(f"[chronicle] transcript changed during write of {sid[:8]} — "
+                  f"undo + requeue", file=sys.stderr)
+            clear_session_markers(digest.session_id)
+            retry.append((sid, ev))
             continue
         # Requeue if the session still has no terminal outcome — transient
         # failure under max retries, or an INFRA error that doesn't count.
@@ -244,6 +365,40 @@ def _process_events(events: list[dict], pending_sessions: dict) -> bool:
     return activity
 
 
+def _compact_events_if_safe(offset: int, pending_sessions: dict) -> int:
+    """Compact a fully-consumed background events file without replacing it."""
+    if pending_sessions:
+        return offset
+    if not is_background_mode():
+        return offset
+
+    ef = events_file()
+    try:
+        if not ef.exists():
+            return offset
+        if ef.stat().st_size <= _MAX_EVENTS_BYTES:
+            return offset
+        with open(ef, "r+b") as f:
+            locked = _lock_file_exclusive(f)
+            try:
+                st = os.fstat(f.fileno())
+                if st.st_size <= _MAX_EVENTS_BYTES:
+                    return offset
+                if offset != st.st_size:
+                    return offset
+                f.truncate(0)
+                try:
+                    os.chmod(ef, 0o600)
+                except OSError:
+                    pass
+                return 0
+            finally:
+                if locked:
+                    _unlock_file(f)
+    except OSError:
+        return offset
+
+
 # Singleton and inode-validation helpers live in chronicle.locks now.
 # Thin shims kept so callers that still import from chronicle.daemon
 # (chronicle.query._is_running, older tests) don't have to chase the move.
@@ -277,7 +432,7 @@ def _scan_for_unprocessed(pending_sessions: dict, config: dict) -> int:
         if any(sp in project_dir.name for sp in skip_projects):
             continue
 
-        quiet_seconds = config.get("quiet_minutes", 5) * 60
+        quiet_seconds = _quiet_seconds(config)
         now = time.time()
 
         for jsonl_file in project_dir.glob("*.jsonl"):
@@ -293,7 +448,7 @@ def _scan_for_unprocessed(pending_sessions: dict, config: dict) -> int:
             except OSError:
                 continue
 
-            session_id = jsonl_file.stem
+            session_id = _session_id_from_jsonl(jsonl_file)
             if session_id in pending_sessions:
                 continue
 
@@ -462,6 +617,7 @@ async def run_daemon_async():
                 # Only persist offset when pending is empty, so a crash
                 # during debounce doesn't drop sessions.
                 if not pending_sessions:
+                    offset = _compact_events_if_safe(offset, pending_sessions)
                     _save_offset(offset)
 
             except asyncio.CancelledError:

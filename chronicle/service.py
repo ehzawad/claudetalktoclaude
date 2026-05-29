@@ -125,6 +125,8 @@ def _mac_plist_contents() -> str:
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>ExitTimeOut</key>
+    <integer>20</integer>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
@@ -196,6 +198,8 @@ Environment="PATH={path_val}"
 ExecStart={chronicle_bin} daemon
 Restart=on-failure
 RestartSec=10
+TimeoutStopSec=20s
+KillMode=control-group
 
 [Install]
 WantedBy=default.target

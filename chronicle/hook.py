@@ -30,30 +30,62 @@ _MAX_ERROR_LOG_BYTES = 1_000_000  # ~1MB cap
 _MAX_EVENTS_BYTES = 5 * 1024 * 1024  # ~5 MiB foreground cap for events.jsonl
 
 
+def _lock_file_exclusive(f):
+    """Best-effort advisory lock used only around the single event append."""
+    try:
+        import fcntl
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+    except Exception:
+        return False
+    return True
+
+
+def _unlock_file(f):
+    try:
+        import fcntl
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+
+
+def _chmod_owner_only(path: Path):
+    try:
+        os.chmod(path, 0o600)
+    except Exception:
+        pass
+
+
 def _cap_events_foreground():
     """events.jsonl is consumed only by the background daemon's offset reader;
     in foreground mode nothing reads it, so truncating the whole file when it
     exceeds the cap is safe and prevents unbounded growth (BUG-08). Never raises
-    — the hook must not block the session. Background compaction is left to a
-    future offset-safe design."""
+    — the hook must not block the session. Background compaction is handled by
+    the daemon once its reader has consumed the file."""
     try:
         from .mode import is_foreground_mode
         ef = events_file()
         if is_foreground_mode() and ef.exists() and ef.stat().st_size > _MAX_EVENTS_BYTES:
-            tmp = ef.with_suffix(".tmp")
-            tmp.write_bytes(b"")
-            os.replace(str(tmp), str(ef))
+            with open(ef, "r+b") as f:
+                locked = _lock_file_exclusive(f)
+                try:
+                    f.truncate(0)
+                finally:
+                    if locked:
+                        _unlock_file(f)
+            _chmod_owner_only(ef)
     except Exception:
         pass
 
 
 def _daemon_running() -> bool:
-    """Check if the daemon process is alive via PID file."""
+    """Check if the daemon is alive via the flock-authoritative probe (BUG-10):
+    the OS releases daemon.pid's lock on death, so a recycled PID can't be
+    mistaken for a live daemon and wrongly suppress the SessionStart respawn."""
     try:
-        pid = int(pid_file().read_text().strip())
-        os.kill(pid, 0)
-        return True
-    except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError):
+        from .locks import daemon_is_running
+        running, _pid = daemon_is_running()
+        return running
+    except Exception:
         return False
 
 
@@ -97,7 +129,17 @@ def main():
 
         # Always log the event
         with open(events_file(), "a") as f:
-            f.write(json.dumps(data, separators=(",", ":")) + "\n")
+            locked = _lock_file_exclusive(f)
+            try:
+                f.write(json.dumps(data, separators=(",", ":")) + "\n")
+                # Flush the append while still holding the lock so the daemon's
+                # compaction (which takes the same lock) can never fstat a stale
+                # size and truncate away an event mid-flush (BUG-08).
+                f.flush()
+            finally:
+                if locked:
+                    _unlock_file(f)
+        _chmod_owner_only(events_file())
         _cap_events_foreground()
 
         if event_name == "SessionStart":
@@ -145,6 +187,7 @@ def main():
             with open(error_log, "a") as f:
                 ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 f.write(f"\n--- {ts} ---\n{traceback.format_exc()}")
+            _chmod_owner_only(error_log)
         except Exception:
             pass  # truly last resort — cannot even log
 

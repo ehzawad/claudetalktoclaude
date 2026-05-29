@@ -23,6 +23,7 @@ from .config import (
     chronicle_dir, claude_projects, config_file,
     processed_dir, processing_lock_path,
 )
+from .extractor import _session_id_from_jsonl
 from .install_hooks import _is_chronicle_hook_command
 from .locks import daemon_is_running, processing_lock_held
 from .mode import get_processing_mode
@@ -41,7 +42,7 @@ def _count_sessions() -> dict:
             for jsonl in proj.glob("*.jsonl"):
                 if "subagents" in str(jsonl):
                     continue
-                sid = jsonl.stem
+                sid = _session_id_from_jsonl(jsonl)
                 if is_succeeded(sid):
                     ok += 1
                 elif is_terminal_failure(sid):

@@ -12,6 +12,8 @@ FAKE_CLAUDE_MODE env var:
   parse          stdout is not JSON (parse-fail path)
   timeout        Sleep 600s so parent wait_for(300) times out
   no-structured  Valid JSON without structured_output key (fallback to result)
+  result         JSON with a top-level `result` string from $FAKE_CLAUDE_RESULT
+                 (for insight/story/rewind --summary, which read result["result"])
 
 Always drains stdin so the summarizer's prompt write doesn't deadlock.
 """
@@ -84,6 +86,13 @@ def main() -> None:
             "total_cost_usd": 0.01,
             "is_error": False,
             "result": "",
+        })
+
+    if mode == "result":
+        _emit({
+            "total_cost_usd": 0.01,
+            "is_error": False,
+            "result": os.environ.get("FAKE_CLAUDE_RESULT", "stub result content"),
         })
 
     _emit({
