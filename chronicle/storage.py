@@ -248,15 +248,14 @@ def _remove_session_entry(content: str, session_marker: str) -> str:
     """Remove an existing session's timeline row + detail section from chronicle.md."""
     marker_idx = content.index(session_marker)
 
-    # Walk backwards from the marker to find the nearest heading (# or ##)
-    search_region = content[max(0, marker_idx - 300):marker_idx]
-    heading_offset = -1
-    for prefix in ("\n# ", "\n## "):
-        pos = search_region.rfind(prefix)
-        if pos >= 0:
-            heading_offset = max(heading_offset, pos)
-    if heading_offset >= 0:
-        heading_start = max(0, marker_idx - 300) + heading_offset + 1  # +1 skip \n
+    # The marker is always injected on its own line immediately after the
+    # (demoted) heading line, so derive the heading from the line directly
+    # above the marker line rather than a fixed 300-char window (BUG-21:
+    # titles longer than ~295 chars fell outside the window and orphaned).
+    marker_line_start = content.rfind("\n", 0, marker_idx) + 1
+    heading_line_start = content.rfind("\n", 0, marker_line_start - 1) + 1
+    if content[heading_line_start:heading_line_start + 1] == "#":
+        heading_start = heading_line_start
     else:
         heading_start = marker_idx
 
@@ -461,11 +460,24 @@ def append_to_chronicle(entry, slug: str):
             existing = _remove_session_entry(existing, session_marker)
 
         if _TIMELINE_END in existing:
-            # Insert row into existing timeline (after separator, before end marker)
-            # Rows are newest-first, so insert right after the separator line
-            sep_idx = existing.index(_TIMELINE_SEP)
-            after_sep = existing.index("\n", sep_idx) + 1
-            existing = existing[:after_sep] + table_row + "\n" + existing[after_sep:]
+            # Insert the row into the timeline, repairing the table in place if
+            # it is corrupt (BUG-09): a present end marker does NOT guarantee the
+            # separator/header survived a hand-edit, and a bare index() would
+            # raise ValueError -> escape write_chronicle with no marker written
+            # (infinite re-summarization in bg / batch abort in fg).
+            sep_idx = existing.find(_TIMELINE_SEP)
+            if sep_idx != -1:
+                after_sep = existing.index("\n", sep_idx) + 1
+                existing = existing[:after_sep] + table_row + "\n" + existing[after_sep:]
+            else:
+                hdr_idx = existing.find(_TIMELINE_HEADER)
+                if hdr_idx != -1:
+                    after_hdr = existing.index("\n", hdr_idx) + 1
+                    existing = existing[:after_hdr] + _TIMELINE_SEP + "\n" + table_row + "\n" + existing[after_hdr:]
+                else:
+                    end_idx = existing.index(_TIMELINE_END)
+                    block = _TIMELINE_HEADER + "\n" + _TIMELINE_SEP + "\n" + table_row + "\n"
+                    existing = existing[:end_idx] + block + existing[end_idx:]
             # Splice the detail BEFORE the EOF prompts block so a later
             # rebuild_prompts_section() can't truncate it (see _splice_detail).
             _atomic_write(chronicle_file, _splice_detail(existing, detail_section))

@@ -11,6 +11,7 @@ import sys
 
 
 def main():
+    os.umask(0o077)  # owner-only perms for everything chronicle writes (BUG-25)
     prog = os.path.basename(sys.argv[0]).lower()
     # Strip macOS code-signing suffix if present (.exe is Windows, but harmless).
     for suffix in (".exe",):

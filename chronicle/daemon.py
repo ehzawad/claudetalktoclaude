@@ -53,6 +53,7 @@ from .locks import (
 from .mode import is_background_mode
 from .storage import (
     is_succeeded, is_terminal_failure, write_chronicle,
+    record_failed_attempt, get_attempt_count,
 )
 from .summarizer import async_summarize_session
 
@@ -144,21 +145,35 @@ async def _process_batch(events: list[tuple[str, dict]], config: dict) -> list[t
                   file=sys.stderr)
             retry.append((sid, ev))
         elif result is not None:
-            pending_writes.append(result)
+            # Carry the ORIGINAL pending key (sid, ev) alongside the result so
+            # requeue stays correct even if extract overwrote digest.session_id
+            # to differ from the file stem we were queued under (BUG-20 FIX 1).
+            digest, entry = result
+            pending_writes.append((sid, ev, digest, entry))
 
-    pending_writes.sort(key=lambda pair: pair[0].start_time)
-    for digest, entry in pending_writes:
-        write_chronicle(entry, digest, max_retries=max_retries)
-        # Requeue if the session still has no terminal outcome — i.e.,
-        # transient failure that hasn't hit max retries yet, or an INFRA
-        # error that doesn't count against retries.
+    pending_writes.sort(key=lambda t: t[2].start_time)
+    for sid, ev, digest, entry in pending_writes:
+        # Guard per-session: one write failure (ENOSPC, or a corrupt
+        # chronicle.md) must not abort the whole batch, and the daemon must
+        # record a failure marker so it doesn't re-summarize forever (BUG-12).
+        try:
+            write_chronicle(entry, digest, max_retries=max_retries)
+        except Exception as e:
+            print(f"[chronicle] write failed for {sid[:8]}: {e}", file=sys.stderr)
+            terminal = get_attempt_count(digest.session_id) + 1 >= max_retries
+            record_failed_attempt(
+                digest.session_id, error_kind="transient",
+                error_message=f"write_chronicle: {e}", terminal=terminal,
+            )
+            if not terminal:
+                retry.append((sid, ev))
+            continue
+        # Requeue if the session still has no terminal outcome — transient
+        # failure under max retries, or an INFRA error that doesn't count.
         if (entry.is_error
                 and not is_succeeded(digest.session_id)
                 and not is_terminal_failure(digest.session_id)):
-            for sid, ev in events:
-                if sid == digest.session_id:
-                    retry.append((sid, ev))
-                    break
+            retry.append((sid, ev))
 
     return retry
 
@@ -406,7 +421,30 @@ async def run_daemon_async():
                                     pending_sessions[sid] = ev
                                 last_activity = time.time()
                             else:
-                                retry = await _process_batch(to_process, config)
+                                # Race the batch against shutdown so a SIGTERM
+                                # mid-batch terminates in-flight claude children
+                                # immediately instead of waiting out the whole
+                                # batch (BUG-04). The finally below is an
+                                # idempotent backstop.
+                                batch_task = asyncio.ensure_future(
+                                    _process_batch(to_process, config))
+                                stop_task = asyncio.ensure_future(stop_event.wait())
+                                done, _pending = await asyncio.wait(
+                                    {batch_task, stop_task},
+                                    return_when=asyncio.FIRST_COMPLETED,
+                                )
+                                if stop_task in done and not batch_task.done():
+                                    terminated = await terminate_active_subprocesses(
+                                        grace_seconds=5.0)
+                                    if terminated.get("terminated"):
+                                        print(f"[chronicle] terminated "
+                                              f"{terminated['terminated']} in-flight "
+                                              f"claude subprocess(es), killed "
+                                              f"{terminated['killed']}", file=sys.stderr)
+                                    retry = await batch_task
+                                else:
+                                    stop_task.cancel()
+                                    retry = await batch_task
                                 if retry:
                                     for sid, ev in retry:
                                         pending_sessions[sid] = ev
@@ -442,6 +480,12 @@ async def run_daemon_async():
             print(f"[chronicle] terminated {terminated['terminated']} in-flight "
                   f"claude subprocess(es), killed {terminated['killed']}")
         print("[chronicle] daemon stopped")
+        # Drop our pid file on a clean exit so a later recycled PID can't be
+        # mistaken for a live daemon (BUG-10) — only if we still own the lock.
+        if daemon_lock_still_valid():
+            import contextlib
+            with contextlib.suppress(OSError):
+                pid_file().unlink()
 
 
 def run_daemon():
@@ -450,6 +494,7 @@ def run_daemon():
 
 
 def main():
+    os.umask(0o077)  # owner-only perms for everything chronicle writes (BUG-25)
     parser = argparse.ArgumentParser(description="Decision Chronicle daemon")
     parser.add_argument("--bg", action="store_true", help="Run as background daemon")
     parser.add_argument("--stop", action="store_true", help="Stop running daemon")
@@ -466,7 +511,7 @@ def main():
 
     if args.stop:
         running, pid = _is_running()
-        if running:
+        if running and pid:
             os.kill(pid, signal.SIGTERM)
             print(f"Sent SIGTERM to daemon (pid {pid})")
         else:

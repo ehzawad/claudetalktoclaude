@@ -74,3 +74,61 @@ def test_reprocess_preserves_other_sessions_and_no_orphans(isolated_chronicle):
     assert content.count("<details><summary>User prompts (verbatim)</summary>") == 3
     assert "NARRATIVE_2_REPROC" in content
     assert "NARRATIVE_1" in content and "NARRATIVE_3" in content
+
+
+def test_corrupt_chronicle_missing_separator_self_heals(isolated_chronicle):
+    # BUG-09: a chronicle.md with the end marker but a missing timeline
+    # separator must NOT raise (which escapes write_chronicle with no marker ->
+    # infinite re-summarization / batch abort); append must repair in place.
+    from chronicle import storage
+    from chronicle.config import project_chronicle_dir
+    slug = "-tmp-proj9"
+    storage.write_chronicle(_entry("sess-1-aaaaaaaa", 1, slug),
+                            _digest("sess-1-aaaaaaaa", slug), max_retries=3)
+    cf = project_chronicle_dir(slug) / "chronicle.md"
+    content = cf.read_text()
+    assert storage._TIMELINE_SEP + "\n" in content
+    # Corrupt: delete the separator line, keep the end marker.
+    cf.write_text(content.replace(storage._TIMELINE_SEP + "\n", ""))
+    assert storage._TIMELINE_END in cf.read_text()
+    assert storage._TIMELINE_SEP not in cf.read_text()
+    # Must self-heal, not raise (fails on current code with ValueError).
+    storage.write_chronicle(_entry("sess-2-aaaaaaaa", 2, slug),
+                            _digest("sess-2-aaaaaaaa", slug), max_retries=3)
+    repaired = cf.read_text()
+    assert repaired.count(storage._TIMELINE_HEADER) == 1
+    assert repaired.count(storage._TIMELINE_SEP) == 1
+    assert repaired.count(storage._TIMELINE_END) == 1
+    assert "NARRATIVE_2" in repaired
+
+
+def test_long_title_reprocess_no_orphan_heading(isolated_chronicle):
+    # BUG-21: _remove_session_entry's old 300-char backward window orphaned the
+    # heading for titles longer than ~295 chars on reprocess.
+    from chronicle import storage
+    from chronicle.config import project_chronicle_dir
+    from chronicle.summarizer import ChronicleEntry
+    from chronicle.extractor import UserPrompt
+    slug = "-tmp-proj21"
+    long_title = "X" * 350
+
+    def mk(suffix):
+        return ChronicleEntry(
+            session_id="sess-long-aaaaaaaa", project_path="/tmp/p", project_slug=slug,
+            start_time="2026-05-29T11:00:00Z", end_time="2026-05-29T11:30:00Z",
+            git_branch="main",
+            user_prompts=[UserPrompt(text="p", timestamp="2026-05-29T11:00:00Z", uuid="u")],
+            title=long_title, summary="S.", narrative=f"NARR{suffix}",
+            decisions=[{"what": "D", "why": "B", "status": "done"}],
+            total_turns=1, total_cost_usd=0.01,
+        )
+
+    d = _digest("sess-long-aaaaaaaa", slug)
+    storage.write_chronicle(mk(""), d, max_retries=3)
+    storage.write_chronicle(mk("_REPROC"), d, max_retries=3)  # reprocess -> _remove_session_entry
+    content = (project_chronicle_dir(slug) / "chronicle.md").read_text()
+    # Count exact heading LINES (the prompts section repeats the title as a
+    # "### <title>" subheading, which contains "## <title>" as a substring).
+    assert content.split("\n").count("## " + long_title) == 1, "orphaned long-title heading line"
+    assert content.count("<!-- session:") == 1
+    assert "NARR_REPROC" in content

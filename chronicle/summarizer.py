@@ -216,6 +216,20 @@ def _make_entry(digest: SessionDigest) -> ChronicleEntry:
     )
 
 
+def _as_list(v):
+    """Coerce a structured_output field to a list. The --json-schema path is
+    validated by the CLI, but the _extract_structured fallback is not: a model
+    returning a bare string where a list is expected would otherwise be rendered
+    character-by-character. A scalar becomes a one-item list; None/'' -> []."""
+    return v if isinstance(v, list) else ([] if v in (None, "") else [v])
+
+
+def _as_dict(v):
+    """Coerce a structured_output field to a dict so markdown rendering can call
+    .get() safely; a non-dict (e.g. the model returning a string) becomes {}."""
+    return v if isinstance(v, dict) else {}
+
+
 def _populate_entry_from_structured(data: dict, entry: ChronicleEntry) -> ChronicleEntry:
     """Fill a ChronicleEntry from a validated structured_output dict."""
     if data.get("is_empty"):
@@ -226,16 +240,16 @@ def _populate_entry_from_structured(data: dict, entry: ChronicleEntry) -> Chroni
     entry.title = data.get("title", "Untitled session")
     entry.summary = data.get("summary", "")
     entry.narrative = data.get("narrative", "")
-    entry.decisions = data.get("decisions", [])
-    entry.problems_solved = data.get("problems_solved", [])
-    entry.human_reasoning = data.get("human_reasoning", [])
-    entry.follow_ups = data.get("follow_ups", [])
-    entry.technical_details = data.get("technical_details", {})
-    entry.architecture = data.get("architecture", {})
-    entry.planning = data.get("planning", {})
-    entry.open_questions = data.get("open_questions", [])
-    entry.files_changed = data.get("files_changed", [])
-    entry.cross_references = data.get("cross_references", [])
+    entry.decisions = _as_list(data.get("decisions", []))
+    entry.problems_solved = _as_list(data.get("problems_solved", []))
+    entry.human_reasoning = _as_list(data.get("human_reasoning", []))
+    entry.follow_ups = _as_list(data.get("follow_ups", []))
+    entry.technical_details = _as_dict(data.get("technical_details", {}))
+    entry.architecture = _as_dict(data.get("architecture", {}))
+    entry.planning = _as_dict(data.get("planning", {}))
+    entry.open_questions = _as_list(data.get("open_questions", []))
+    entry.files_changed = _as_list(data.get("files_changed", []))
+    entry.cross_references = _as_list(data.get("cross_references", []))
     return entry
 
 

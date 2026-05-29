@@ -65,6 +65,7 @@ Usage:
     chronicle --version
 """
 
+import os
 import sys
 
 
@@ -78,6 +79,7 @@ def _run_remote_install_script(url: str) -> int:
 
 
 def main():
+    os.umask(0o077)  # owner-only perms for everything chronicle writes (BUG-25)
     if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(0)
@@ -163,12 +165,17 @@ def install_daemon():
     if accepted:
         print("Installed background daemon and set processing_mode=background.")
     else:
+        # Manager rejected the job — roll mode back to foreground (BUG-16,
+        # Option B) so doctor doesn't report background intent with no running
+        # daemon and the SessionStart hook doesn't keep respawning a daemon
+        # that never starts. Leave the service file on disk for inspection.
+        set_processing_mode("foreground")
         print("Service file written, but the service manager did NOT start the daemon cleanly.",
               file=sys.stderr)
         detail = service.last_service_error()
         if detail:
             print(f"Details: {detail}", file=sys.stderr)
-        print("processing_mode=background is set; run `chronicle doctor` for details.",
+        print("Rolled processing_mode back to foreground; run `chronicle doctor` for details.",
               file=sys.stderr)
     print()
     if sys.platform == "darwin":

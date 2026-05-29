@@ -210,8 +210,15 @@ async def async_batch_process(
 
         entry = result
         # Use the same write path as the daemon — handles retries,
-        # cost persistence, and empty sessions consistently
-        write_chronicle(entry, digest, max_retries=max_retries)
+        # cost persistence, and empty sessions consistently. Guard per-session
+        # so one write failure (ENOSPC, or a corrupt chronicle.md) can't abort
+        # the whole batch and waste the other sessions' already-spent tokens (BUG-12).
+        try:
+            write_chronicle(entry, digest, max_retries=max_retries)
+        except Exception as e:
+            print(f"  ERROR {digest.session_id[:8]}: write failed: {e}")
+            error_count += 1
+            continue
         if entry.is_error:
             print(f"  RETRY-LATER {digest.session_id[:8]}: transient failure")
             error_count += 1
@@ -249,6 +256,7 @@ async def async_batch_process(
 
 
 def main():
+    os.umask(0o077)  # owner-only perms for everything chronicle writes (BUG-25)
     parser = argparse.ArgumentParser(
         description="Process existing Claude Code sessions"
     )

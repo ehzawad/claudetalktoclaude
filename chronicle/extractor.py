@@ -78,6 +78,10 @@ _SECRET_PATTERNS = re.compile(
     r"Cookie:\s*[^\r\n]+|"
     r"Set-Cookie:\s*[^\r\n]+|"
     r"X-[A-Za-z-]+-(?:Key|Token|Auth|Secret):\s*[^\r\n]+|"
+    # JSON-quoted credentials: "access_token": "ya29...", "SecretAccessKey": "..."
+    # — a quoted key, colon, quoted value. Narrow on purpose (quoted value only)
+    # so it cannot eat numeric/unquoted neighbours like {"token": 5, "next": "x"}.
+    r'"(?:api[_-]?key|secret[_-]?access[_-]?key|secret[_-]?key|secret|access[_-]?token|access[_-]?key|refresh[_-]?token|client[_-]?secret|credentials|password|token)"\s*:\s*"[^"]+"|'
     r"(?:export\s+)?(?:API_KEY|SECRET|TOKEN|PASSWORD|CREDENTIALS|AUTH|PRIVATE_KEY|ACCESS_KEY)"
     r"[_A-Z]*[\s]*[=:]\s*\S+|"
     r"Bearer\s+\S+|"

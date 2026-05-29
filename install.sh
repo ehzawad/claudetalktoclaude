@@ -122,16 +122,28 @@ tar -xzf chronicle.tar.gz
 # -----------------------------------------------------------------------------
 # 5. Clean up legacy install layouts
 # -----------------------------------------------------------------------------
-# Stop the daemon if it's running, so we can safely replace the binary.
+# Stop the daemon before replacing the binary. Use the SERVICE MANAGER, not a
+# raw `kill` (BUG-11): launchd KeepAlive=true would respawn a kill'd daemon
+# mid-swap, and systemd treats SIGTERM as a clean exit so Restart=on-failure
+# leaves it down. `launchctl bootout` fully unregisters (KeepAlive can't
+# respawn); `systemctl --user stop` is deterministic. Fall back to a direct
+# signal only for an unmanaged/manually-started daemon.
 DAEMON_WAS_RUNNING=0
-if [ -f "$CHRONICLE_HOME/daemon.pid" ]; then
+if [ "$OS" = "Darwin" ] && launchctl print "gui/$(id -u)/com.chronicle.daemon" >/dev/null 2>&1; then
+    DAEMON_WAS_RUNNING=1
+    launchctl bootout "gui/$(id -u)/com.chronicle.daemon" >/dev/null 2>&1 || true
+    sleep 1
+elif [ "$OS" = "Linux" ] && systemctl --user is-active --quiet chronicle-daemon.service 2>/dev/null; then
+    DAEMON_WAS_RUNNING=1
+    systemctl --user stop chronicle-daemon.service >/dev/null 2>&1 || true
+elif [ -f "$CHRONICLE_HOME/daemon.pid" ]; then
     DAEMON_PID=$(cat "$CHRONICLE_HOME/daemon.pid" 2>/dev/null || echo "")
     if [ -n "$DAEMON_PID" ] && kill -0 "$DAEMON_PID" 2>/dev/null; then
         DAEMON_CMD="$(ps -p "$DAEMON_PID" -o command= 2>/dev/null || true)"
         if echo "$DAEMON_CMD" | grep -q "chronicle"; then
             DAEMON_WAS_RUNNING=1
             kill -TERM "$DAEMON_PID" 2>/dev/null || true
-            # Give launchd/systemd a moment to notice before we overwrite files.
+            # Give the OS a moment before we overwrite files.
             sleep 1
         else
             echo "Ignoring stale daemon.pid ($DAEMON_PID does not look like chronicle)."
@@ -214,16 +226,24 @@ EFFECTIVE_MODE=$("$BIN_DIR/chronicle" doctor 2>/dev/null | awk '/^mode:/ {print 
 
 if [ "$EFFECTIVE_MODE" = "background" ]; then
     if [ "$OS" = "Darwin" ]; then
-        if launchctl print "gui/$(id -u)/com.chronicle.daemon" >/dev/null 2>&1; then
-            launchctl kickstart -k "gui/$(id -u)/com.chronicle.daemon" >/dev/null 2>&1 \
-                && echo "Kickstarted launchd daemon (new binary active)." \
-                || echo "  (launchctl kickstart failed; daemon will pick up new binary on next restart)"
+        PLIST="$HOME/Library/LaunchAgents/com.chronicle.daemon.plist"
+        if [ -f "$PLIST" ]; then
+            # We bootout'd before the swap (BUG-11), so bootstrap to reload the
+            # new binary. bootout-first makes this idempotent if still loaded.
+            launchctl bootout "gui/$(id -u)/com.chronicle.daemon" >/dev/null 2>&1 || true
+            if launchctl bootstrap "gui/$(id -u)" "$PLIST" >/dev/null 2>&1; then
+                echo "Reloaded launchd daemon (new binary active)."
+            else
+                echo "  (launchd reload failed; run: chronicle install-daemon)"
+            fi
         fi
     elif [ "$OS" = "Linux" ]; then
-        if systemctl --user is-active --quiet chronicle-daemon.service 2>/dev/null; then
-            systemctl --user restart chronicle-daemon.service \
-                && echo "Restarted systemd daemon (new binary active)." \
-                || echo "  (systemctl restart failed; daemon will pick up new binary on next restart)"
+        # We stopped it before the swap; start it again on the new binary
+        # (do NOT gate on is-active — it is stopped now, which is the bug).
+        if systemctl --user start chronicle-daemon.service >/dev/null 2>&1; then
+            echo "Started systemd daemon (new binary active)."
+        else
+            echo "  (systemctl start failed; run: chronicle install-daemon)"
         fi
     fi
 fi
