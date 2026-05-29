@@ -126,7 +126,13 @@ def processing_lock_held() -> bool:
     """True iff some process currently holds the processing lock."""
     if not processing_lock_path().exists():
         return False
-    fd = os.open(str(processing_lock_path()), os.O_WRONLY)
+    try:
+        fd = os.open(str(processing_lock_path()), os.O_RDONLY | os.O_CREAT, 0o600)
+    except OSError:
+        # Cannot probe (race-deleted file, permission denied, path turned
+        # into a dir, etc.) -> treat as not held. A read-only diagnostic
+        # must never raise.
+        return False
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

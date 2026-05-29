@@ -88,6 +88,9 @@ def main():
         from . import __version__
         print(f"chronicle {__version__}")
         sys.exit(0)
+    if command in ("--help", "-h", "help"):
+        print(__doc__)
+        sys.exit(0)
     # Shift argv so submodule parsers see correct args
     sys.argv = [f"chronicle.{command}"] + sys.argv[2:]
 

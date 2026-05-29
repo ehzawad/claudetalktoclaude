@@ -81,7 +81,9 @@ _SECRET_PATTERNS = re.compile(
     r"(?:export\s+)?(?:API_KEY|SECRET|TOKEN|PASSWORD|CREDENTIALS|AUTH|PRIVATE_KEY|ACCESS_KEY)"
     r"[_A-Z]*[\s]*[=:]\s*\S+|"
     r"Bearer\s+\S+|"
-    r"(?:sk-|pk-|ghp_|gho_|github_pat_|xoxb-|xoxp-|sk_live_|sk_test_|rk_live_|rk_test_|AKIA)\S+|"
+    r"(?:sk-|pk-|ghp_|gho_|github_pat_|xoxb-|xoxp-|xoxa-|xapp-|xoxr-|"
+    r"sk_live_|sk_test_|rk_live_|rk_test_|whsec_|npm_|AKIA)\S+|"
+    r"AIza[0-9A-Za-z_-]{35}|"
     r"(?:mongodb\+srv|postgres(?:ql)?|mysql|redis|amqp)://\S+|"
     r"(?:eyJ[A-Za-z0-9_-]{20,}\.){1,2}[A-Za-z0-9_-]+|"  # JWTs
     # URL query-string credentials: ?token=..., &api_key=..., ?access_token=...
@@ -366,7 +368,7 @@ def extract_session(jsonl_path: str) -> SessionDigest:
                 tool_results = _extract_user_tool_results(content)
 
                 if text is not None and _is_real_user_prompt(text):
-                    clean_text = _SYSTEM_TAG_PATTERN.sub("", text).strip()
+                    clean_text = _redact_secrets(_SYSTEM_TAG_PATTERN.sub("", text).strip())
                     if clean_text:
                         digest.user_prompts.append(UserPrompt(
                             text=clean_text,
@@ -406,11 +408,11 @@ def extract_session(jsonl_path: str) -> SessionDigest:
                                 turn_tool_actions.append(summary)
                             if detail:
                                 turn_tool_details.append(detail)
-                    full_text = "\n".join(text_parts).strip()
+                    full_text = _redact_secrets("\n".join(text_parts).strip())
                     if full_text:
                         digest.assistant_responses.append(full_text)
                 elif isinstance(content, str) and content.strip():
-                    full_text = content.strip()
+                    full_text = _redact_secrets(content.strip())
                     digest.assistant_responses.append(full_text)
                 else:
                     full_text = ""

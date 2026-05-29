@@ -116,7 +116,14 @@ async def _process_batch(events: list[tuple[str, dict]], config: dict) -> list[t
     Returns (session_id, event) pairs that should be retried on the next
     debounce cycle. Sessions that exceed max_retries are given up on.
     """
-    concurrency = config.get("concurrency", 5)
+    # Floor at 1: a user-edited config.json with concurrency<=0 would make
+    # Semaphore(0) hang forever while holding processing.lock (which also
+    # blocks `chronicle process`), or Semaphore(-1) raise ValueError.
+    try:
+        _c = int(config.get("concurrency", 5))
+    except (TypeError, ValueError):
+        _c = 5
+    concurrency = max(1, _c)
     semaphore = asyncio.Semaphore(concurrency)
     tasks = [
         _async_process_one(event, config, semaphore)

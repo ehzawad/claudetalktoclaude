@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 
@@ -163,6 +164,24 @@ def load_recent_titles(project_slug: str, max_entries: int = 10) -> list[str]:
         except Exception:
             continue
     return titles
+
+
+def project_slug_for(cwd: str, transcript_path: str | None = None) -> str:
+    """Compute the storage slug the way Claude Code names ~/.claude/projects dirs.
+
+    Storage keys projects by Claude Code's own directory name (see
+    extractor: project_slug = path.parent.name). Claude Code replaces EVERY
+    non-alphanumeric char with '-' and does NOT collapse runs, so
+    '/Users/x/.config/nvim' becomes '-Users-x--config-nvim' (double dash).
+    A naive cwd.replace('/', '-') silently mismatches any path containing
+    '.' or '_'. Prefer the authoritative transcript_path parent dir name
+    (it IS Claude Code's slug); otherwise fall back to a per-character
+    substitution — NO '+' quantifier, because runs must not collapse.
+    """
+    if transcript_path:
+        return Path(transcript_path).parent.name
+    normalized = cwd.rstrip("/") or cwd
+    return re.sub(r"[^A-Za-z0-9]", "-", normalized)
 
 
 # ---------- PEP 562 lazy-constant compat shim ----------
