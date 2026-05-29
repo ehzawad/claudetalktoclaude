@@ -1,4 +1,4 @@
-"""Fail-before/pass-after regression tests for the v0.8.8 deferred batch.
+"""Fail-before/pass-after regression tests for deferred batch fixes.
 
 Covered here:
   BUG-03b  JSON-quoted credentials redacted; benign compact JSON not over-redacted

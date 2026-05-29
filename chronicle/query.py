@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 from .config import projects_dir, project_slug_for
+from .extractor import _session_id_from_jsonl
 
 
 def search(query: str, project: str | None = None):
@@ -290,7 +291,9 @@ def list_projects():
             for jsonl in cp_slug.glob("*.jsonl"):
                 if "subagents" in str(jsonl):
                     continue
-                sid = jsonl.stem
+                # Use the canonical in-file sessionId so `query projects` agrees
+                # with doctor + the daemon scanner on marker identity (BUG-20).
+                sid = _session_id_from_jsonl(jsonl)
                 if is_succeeded(sid):
                     processed += 1
                 elif is_terminal_failure(sid):
