@@ -20,7 +20,7 @@ import shlex
 import sys
 from pathlib import Path
 
-from .config import projects_dir
+from .config import projects_dir, project_slug_for
 
 
 def search(query: str, project: str | None = None):
@@ -115,7 +115,7 @@ def sessions(project_path: str | None = None):
     """Show the chronicle for the current project (or a given path/name)."""
     cwd = project_path or os.environ.get("CHRONICLE_ORIGINAL_CWD", os.getcwd())
     cwd = cwd.rstrip("/")
-    slug = cwd.replace("/", "-")
+    slug = project_slug_for(cwd)
     project_dir = projects_dir() / slug
 
     # If exact slug doesn't match, try substring match (e.g. "codex-opinion"

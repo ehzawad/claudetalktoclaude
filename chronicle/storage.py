@@ -58,7 +58,7 @@ def mark_succeeded(session_id: str, end_time: str, cost_usd: float = 0.0):
     """Record a successful chronicle; clear any failure state."""
     _ensure_dir(processed_dir())
     h = session_hash(session_id)
-    (processed_dir() / h).write_text(f"{session_id}\n{end_time}\n{cost_usd:.4f}\n")
+    _atomic_write(processed_dir() / h, f"{session_id}\n{end_time}\n{cost_usd:.4f}\n")
     clear_failed(session_id)
 
 
@@ -333,11 +333,14 @@ def rebuild_prompts_section(slug: str):
         prompts_text = details_match.group(1)
         # Parse individual prompts: **Prompt N** (timestamp):
         for m in re.finditer(
-            r"\*\*Prompt (\d+)\*\* \(([^)]*)\):\s*\n((?:> .+\n?)+)",
+            r"\*\*Prompt (\d+)\*\* \(([^)]*)\):\s*\n((?:>(?: .*)?\n?)+)",
             prompts_text
         ):
             num, ts, quoted = m.group(1), m.group(2), m.group(3)
-            text = "\n".join(line[2:] for line in quoted.strip().split("\n"))
+            text = "\n".join(
+                line[2:] if line.startswith("> ") else (line[1:] if line.startswith(">") else line)
+                for line in quoted.strip().split("\n")
+            )
             all_prompts.append((ts, session_title, int(num), text))
 
     if not all_prompts:
@@ -410,6 +413,25 @@ def _timeline_row(entry, sf: str) -> str:
     return f"| {ts} | [{title}](sessions/{sf}) | {n_decisions} | {summary} |"
 
 
+def _splice_detail(existing: str, detail_section: str) -> str:
+    """Insert a detail section into chronicle.md content.
+
+    rebuild_prompts_section() keeps a `<!-- prompts -->` chronological block at
+    EOF and replaces everything from the blank line before that marker to EOF, so
+    a detail appended at EOF (after the prompts block) is destroyed on the next
+    rebuild. When the prompts block is present, splice the new detail in just
+    before it, preserving the prior section's `\n---\n\n` terminator so
+    _remove_session_entry can still bound sections; otherwise append at EOF.
+    """
+    if _PROMPTS_MARKER not in existing:
+        return existing + detail_section
+    marker_idx = existing.index(_PROMPTS_MARKER)
+    ins = existing.rfind("\n\n", 0, marker_idx)
+    if ins == -1:
+        return existing[:marker_idx] + detail_section + existing[marker_idx:]
+    return existing[:ins] + "\n" + detail_section.rstrip("\n") + "\n" + existing[ins:]
+
+
 def append_to_chronicle(entry, slug: str):
     """Append to chronicle.md: insert a timeline table row + a detail section."""
     ensure_dirs(slug)
@@ -444,8 +466,9 @@ def append_to_chronicle(entry, slug: str):
             sep_idx = existing.index(_TIMELINE_SEP)
             after_sep = existing.index("\n", sep_idx) + 1
             existing = existing[:after_sep] + table_row + "\n" + existing[after_sep:]
-            # Append detail section at the end
-            _atomic_write(chronicle_file, existing + detail_section)
+            # Splice the detail BEFORE the EOF prompts block so a later
+            # rebuild_prompts_section() can't truncate it (see _splice_detail).
+            _atomic_write(chronicle_file, _splice_detail(existing, detail_section))
         else:
             # Old-format chronicle.md — retrofit a timeline table at the top
             _retrofit_timeline(chronicle_file, existing)
@@ -454,7 +477,7 @@ def append_to_chronicle(entry, slug: str):
             sep_idx = existing.index(_TIMELINE_SEP)
             after_sep = existing.index("\n", sep_idx) + 1
             existing = existing[:after_sep] + table_row + "\n" + existing[after_sep:]
-            _atomic_write(chronicle_file, existing + detail_section)
+            _atomic_write(chronicle_file, _splice_detail(existing, detail_section))
     else:
         project_name = slug.rsplit("-", 1)[-1] if "-" in slug else slug
         header = f"# Chronicle: {project_name}\n\n"

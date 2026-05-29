@@ -33,7 +33,12 @@ def test_suggested_command_uses_slug_not_raw_path(
     # Seed a Claude Code project dir for cwd=/my/project/foo
     project_cwd = tmp_path / "my" / "project" / "foo"
     project_cwd.mkdir(parents=True)
-    slug = str(project_cwd).replace("/", "-")
+    # Claude Code names its project dir by replacing EVERY non-alphanumeric
+    # char (BUG-02 fix), not just '/'. The macOS pytest tmp path contains
+    # underscores, so seed the fixture the way Claude Code actually would —
+    # otherwise the (now-correct) slug query.sessions() computes won't match.
+    from chronicle.config import project_slug_for
+    slug = project_slug_for(str(project_cwd))
     claude_proj = fake_home / ".claude" / "projects" / slug
     claude_proj.mkdir(parents=True)
     (claude_proj / "abc-123.jsonl").write_text('{"type":"user"}\n')
@@ -63,7 +68,9 @@ def test_suggestion_is_substring_of_slug(isolated_query, tmp_path, monkeypatch, 
     fake_home = isolated_query
     project_cwd = tmp_path / "demo-proj"
     project_cwd.mkdir()
-    slug = str(project_cwd).replace("/", "-")
+    # See note above: seed with Claude Code's real per-character slug.
+    from chronicle.config import project_slug_for
+    slug = project_slug_for(str(project_cwd))
     claude_proj = fake_home / ".claude" / "projects" / slug
     claude_proj.mkdir(parents=True)
     (claude_proj / "sess.jsonl").write_text('{}\n')

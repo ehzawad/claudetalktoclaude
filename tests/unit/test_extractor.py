@@ -43,6 +43,28 @@ class TestSecretRedaction:
         assert "AKIA" not in out
         assert "[REDACTED]" in out
 
+    def test_slack_app_config_tokens(self):
+        for tok in ("xoxa-2-abcDEF12345", "xapp-1-A1B2C3D4E5", "xoxr-abcDEF12345"):
+            out = extractor._redact_secrets(f"slack {tok}")
+            assert tok not in out
+            assert "[REDACTED]" in out
+
+    def test_stripe_webhook_secret(self):
+        out = extractor._redact_secrets("whsec_abcDEF1234567890abcDEF1234")
+        assert "whsec_abcDEF" not in out
+        assert "[REDACTED]" in out
+
+    def test_npm_token(self):
+        out = extractor._redact_secrets("npm npm_abcDEF1234567890ABCDEFghij")
+        assert "npm_abcDEF" not in out
+        assert "[REDACTED]" in out
+
+    def test_google_api_key(self):
+        # Real Google API keys are 'AIza' + 35 chars = 39 total.
+        out = extractor._redact_secrets("key=AIzaSyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe")
+        assert "AIzaSyDaGmWKa4JsXZ" not in out
+        assert "[REDACTED]" in out
+
     def test_bearer_token(self):
         out = extractor._redact_secrets("Authorization: Bearer xyzPQR.abcDEF")
         assert "xyzPQR.abcDEF" not in out

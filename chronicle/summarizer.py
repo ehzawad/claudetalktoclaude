@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 from .claude_cli import ErrorKind, spawn_claude
 from .config import load_config
-from .extractor import SessionDigest, digest_to_text, timeline_to_log
+from .extractor import SessionDigest, digest_to_text, timeline_to_log, _redact_secrets
 
 # JSON Schema for structured output validation via --json-schema.
 # Claude must return data matching this schema; the CLI validates it.
@@ -307,9 +307,9 @@ async def async_summarize_session(digest: SessionDigest) -> ChronicleEntry:
     if result.error_kind is not None:
         entry.is_error = True
         entry.error_kind = result.error_kind.value
-        entry.error_message = result.error_message
+        entry.error_message = _redact_secrets(result.error_message or "")
         print(f"[chronicle] summarization {result.error_kind.value}: "
-              f"{result.error_message[:200]}", file=sys.stderr)
+              f"{entry.error_message[:200]}", file=sys.stderr)
         return entry
 
     outer = result.stdout_json or {}

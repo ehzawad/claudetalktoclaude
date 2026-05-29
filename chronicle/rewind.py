@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 
-from .config import projects_dir
+from .config import projects_dir, project_slug_for
 
 
 def _find_project_dir(project: str | None = None) -> Path | None:
@@ -33,7 +33,7 @@ def _find_project_dir(project: str | None = None) -> Path | None:
 
     # Default: current working directory
     cwd = os.getcwd()
-    slug = cwd.replace("/", "-")
+    slug = project_slug_for(cwd)
     candidate = projects_dir() / slug
     if candidate.exists():
         return candidate
@@ -365,7 +365,11 @@ def prune_empty_sessions(sessions: list[dict], project_dir: Path):
         print(f"  #{s['number']:>3}  {s['date'][:16]}  {s['title'][:55]}")
 
     print()
-    confirm = input(f"Delete {len(empty)} session(s)? [y/N] ").strip().lower()
+    try:
+        confirm = input(f"Delete {len(empty)} session(s)? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\nCancelled.")
+        return
     if confirm != "y":
         print("Cancelled.")
         return

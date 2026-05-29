@@ -185,6 +185,9 @@ async def async_batch_process(
     eligible.sort(key=lambda d: d.start_time)
 
     # Phase 2: Summarize in parallel — every session goes through the LLM
+    # Floor at 1: argparse can accept --workers 0 (Semaphore(0) is permanently
+    # locked -> hang) and --workers -1 (Semaphore raises ValueError).
+    workers = max(1, int(workers))
     print(f"Processing {len(eligible)} sessions with {workers} workers...\n")
     semaphore = asyncio.Semaphore(workers)
     tasks = [_process_one(digest, semaphore) for digest in eligible]

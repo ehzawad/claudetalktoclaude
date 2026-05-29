@@ -23,6 +23,7 @@ from pathlib import Path
 
 from .config import (
     chronicle_dir, pid_file, events_file, load_recent_titles,
+    project_slug_for,
 )
 
 _MAX_ERROR_LOG_BYTES = 1_000_000  # ~1MB cap
@@ -93,8 +94,9 @@ def main():
             # session sees "Previous sessions: …" without any tokens being
             # spent on Chronicle's side.
             cwd = data.get("cwd", "")
-            if cwd:
-                slug = cwd.replace("/", "-")
+            tp = data.get("transcript_path", "")
+            if cwd or tp:
+                slug = project_slug_for(cwd, tp or None)
                 titles = load_recent_titles(slug)
                 if titles:
                     context = (

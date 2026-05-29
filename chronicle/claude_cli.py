@@ -287,6 +287,18 @@ async def spawn_claude(
                 error_message=f"claude -p timed out after {timeout}s",
             )
     finally:
+        # Defensive: on any exit path where the child is still alive
+        # (notably asyncio.CancelledError from `chronicle process` Ctrl-C
+        # teardown or task cancellation), kill and reap it before
+        # unregistering so it can't keep running detached and burning
+        # subscription tokens. Normal-completion and timeout paths have
+        # returncode already set, so this is a no-op for them.
+        if proc.returncode is None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except ProcessLookupError:
+                pass
         _unregister(proc)
 
     stdout = stdout_bytes.decode(errors="replace")
