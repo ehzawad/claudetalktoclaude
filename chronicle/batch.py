@@ -52,11 +52,14 @@ def find_all_sessions(project_filter: str | None = None) -> list[tuple[str, Path
     if not claude_projects().exists():
         return []
 
+    from .config import project_name_matches
     sessions = []
     for project_dir in sorted(claude_projects().iterdir()):
         if not project_dir.is_dir():
             continue
-        if project_filter and project_filter not in project_dir.name:
+        # Accept the displayed basename too (e.g. 'my_proj' for slug '-x-my-proj'),
+        # so a name the user can SEE is a name they can filter by.
+        if project_filter and not project_name_matches(project_filter, project_dir.name):
             continue
 
         for jsonl_file in sorted(project_dir.glob("*.jsonl")):
@@ -73,9 +76,8 @@ async def _process_one(digest, semaphore):
     async with semaphore:
         sid = digest.session_id[:8]
         turns = digest.total_turns
-        # Show folder name from slug: -home-synesis-bada → bada
-        parts = digest.project_slug.lstrip("-").split("-")
-        project_name = parts[-1] if parts else digest.project_slug
+        from .config import project_display_name
+        project_name = project_display_name(digest.project_slug, getattr(digest, "project_path", None))
         print(f"  [{project_name}/{sid}] starting ({turns} turns, {len(digest.user_prompts)} prompts)...")
 
         start = time.time()
@@ -149,8 +151,9 @@ async def async_batch_process(
         eligible.append(digest)
 
     if dry_run:
+        from .config import project_display_name
         for digest in eligible:
-            print(f"  WOULD PROCESS: {digest.project_slug}")
+            print(f"  WOULD PROCESS: {project_display_name(digest.project_slug, getattr(digest, 'project_path', None))}")
             print(f"    Session: {digest.session_id[:8]}")
             print(f"    Turns: {digest.total_turns}, Prompts: {len(digest.user_prompts)}")
             print(f"    Time: {digest.start_time[:19]} -> {digest.end_time[:19]}")

@@ -194,6 +194,122 @@ class TestSensitiveFilePathRedaction:
         assert "def hello" in detail.content
         assert "return 'world'" in detail.content
 
+    def test_sensitive_path_redacts_full_input_dump(self):
+        block = self._make_write_block(
+            "/home/user/.env",
+            "PLAIN_SECRET_THAT_MATCHES_NO_TOKEN_PATTERN",
+        )
+        _, detail = extractor._extract_tool(block)
+        assert detail is not None
+        assert "PLAIN_SECRET_THAT_MATCHES_NO_TOKEN_PATTERN" not in detail.input
+        assert "[REDACTED" in detail.input
+
+    def test_sensitive_edit_redacts_pretty_blocks_too(self):
+        block = {
+            "type": "tool_use",
+            "name": "Edit",
+            "input": {
+                "file_path": "/home/user/.env",
+                "old_string": "PLAIN_SECRET_OLD",
+                "new_string": "PLAIN_SECRET_NEW",
+            },
+        }
+        _, detail = extractor._extract_tool(block)
+        assert detail is not None
+        assert "PLAIN_SECRET_OLD" not in detail.old_content
+        assert "PLAIN_SECRET_NEW" not in detail.content
+        assert "PLAIN_SECRET_OLD" not in detail.input
+        assert "PLAIN_SECRET_NEW" not in detail.input
+
+
+# ---------- Tool input archival (no size cap) ----------
+
+class TestToolInputArchival:
+    def _digest_with_detail(self, detail: extractor.ToolDetail) -> extractor.SessionDigest:
+        d = extractor.SessionDigest(
+            session_id="s",
+            project_path="/tmp/demo",
+            project_slug="-tmp-demo",
+            start_time="2026-04-17T00:00:00Z",
+            end_time="2026-04-17T00:00:00Z",
+            git_branch="main",
+        )
+        d.timeline.append(extractor.TimelineEntry(
+            role="assistant",
+            timestamp="2026-04-17T00:00:00Z",
+            text="",
+            tool_details=[detail],
+        ))
+        return d
+
+    def test_agent_prompt_preserved_past_old_cap(self):
+        prompt = "agent prompt " + ("x" * 700) + " TAIL"
+        block = {
+            "type": "tool_use",
+            "name": "Agent",
+            "input": {"description": "investigate", "prompt": prompt},
+        }
+        _, detail = extractor._extract_tool(block)
+        assert detail is not None
+        assert detail.content == prompt
+        assert "TAIL" in detail.input
+
+        log = extractor.timeline_to_log(self._digest_with_detail(detail))
+        assert "Agent prompt" in log
+        assert "TAIL" in log
+        assert "````" in log
+
+        transcript = extractor.digest_to_text(self._digest_with_detail(detail))
+        assert "FULL INPUT:" in transcript
+        assert "TAIL" in transcript
+
+    def test_unknown_tool_input_preserved_and_redacted_past_old_cap(self):
+        payload = ("x" * 650) + " sk-SuperSecretKey"
+        block = {
+            "type": "tool_use",
+            "name": "SomeUnknownTool",
+            "input": {"payload": payload},
+        }
+        _, detail = extractor._extract_tool(block)
+        assert detail is not None
+        assert "x" * 650 in detail.content
+        assert "sk-SuperSecretKey" not in detail.content
+        assert "sk-SuperSecretKey" not in detail.input
+
+    def test_unknown_tool_secret_key_redacted_from_index_and_full_input(self):
+        block = {
+            "type": "tool_use",
+            "name": "SomeUnknownTool",
+            "input": {"token": "plain-secret-value"},
+        }
+        summary, detail = extractor._extract_tool(block)
+        assert detail is not None
+        assert "plain-secret-value" not in summary
+        assert "plain-secret-value" not in detail.content
+        assert "plain-secret-value" not in detail.input
+
+    def test_timeline_log_fence_expands_for_embedded_four_backticks(self):
+        d = extractor.SessionDigest(
+            session_id="s",
+            project_path="/tmp/demo",
+            project_slug="-tmp-demo",
+            start_time="2026-04-17T00:00:00Z",
+            end_time="2026-04-17T00:00:00Z",
+            git_branch="main",
+        )
+        result = "[result toolu_1234567890abcdef]: before\n````\nafter"
+        d.timeline.append(extractor.TimelineEntry(
+            role="tool_result",
+            timestamp="2026-04-17T00:00:00Z",
+            text="",
+            tool_results=[result],
+        ))
+
+        log = extractor.timeline_to_log(d)
+        assert "Full tool output" in log
+        assert "`````\n[result toolu_1234567890abcdef]" in log
+        assert "````\nafter" in log
+
 
 # ---------- User-prompt filtering ----------
 
@@ -255,6 +371,14 @@ class TestToolResultExtraction:
     def test_empty_result_returns_none(self):
         assert extractor._extract_tool_result_text("") is None
         assert extractor._extract_tool_result_text("   \n  ") is None
+
+    def test_tool_result_id_not_truncated(self):
+        results = extractor._extract_user_tool_results([{
+            "type": "tool_result",
+            "tool_use_id": "toolu_1234567890abcdef",
+            "content": "ok",
+        }])
+        assert results == ["[result toolu_1234567890abcdef]: ok"]
 
 
 # ---------- JSONL parsing end-to-end ----------

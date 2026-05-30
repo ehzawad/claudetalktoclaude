@@ -26,7 +26,7 @@ from pathlib import Path
 
 from .config import (
     failed_dir, processed_dir,
-    ensure_dirs, project_chronicle_dir,
+    ensure_dirs, project_chronicle_dir, project_display_name,
 )
 from .summarizer import entry_to_session_markdown
 
@@ -437,6 +437,30 @@ def _splice_detail(existing: str, detail_section: str) -> str:
     return existing[:ins] + "\n" + detail_section.rstrip("\n") + "\n" + existing[ins:]
 
 
+def _repair_chronicle_header(content: str, slug: str, project_path: str | None) -> str:
+    """Backfill an existing chronicle.md H1 to the correct display name.
+
+    Chronicles written before the display-name fix used
+    `# Chronicle: <slug.rsplit('-',1)[-1]>`, which dropped everything before the
+    last dash ('codex-council' -> 'council'). Repair that title in place, but
+    ONLY when the first line is still exactly that auto-generated lossy value —
+    never stomp a header a human has edited. Idempotent: once rewritten to the
+    correct name it no longer equals the lossy value, so repeated appends leave
+    it untouched.
+    """
+    if not content.startswith("# Chronicle: "):
+        return content
+    end = content.find("\n")
+    if end == -1:
+        return content
+    current = content[len("# Chronicle: "):end].strip()
+    old_lossy = slug.rsplit("-", 1)[-1] if "-" in slug else slug
+    correct = project_display_name(slug, project_path)
+    if current == old_lossy and current != correct:
+        return f"# Chronicle: {correct}\n" + content[end + 1:]
+    return content
+
+
 def append_to_chronicle(entry, slug: str):
     """Append to chronicle.md: insert a timeline table row + a detail section."""
     ensure_dirs(slug)
@@ -461,6 +485,10 @@ def append_to_chronicle(entry, slug: str):
 
     if chronicle_file.exists():
         existing = chronicle_file.read_text()
+        # Opportunistically fix a stale lossy H1 ('council' -> 'codex-council')
+        # on this append. Propagates through both the normal and retrofit paths
+        # below since both derive their header from `existing`.
+        existing = _repair_chronicle_header(existing, slug, getattr(entry, "project_path", None))
         # If session already exists, remove old entry so we can replace it
         if session_marker in existing:
             existing = _remove_session_entry(existing, session_marker)
@@ -497,7 +525,7 @@ def append_to_chronicle(entry, slug: str):
             existing = existing[:after_sep] + table_row + "\n" + existing[after_sep:]
             _atomic_write(chronicle_file, _splice_detail(existing, detail_section))
     else:
-        project_name = slug.rsplit("-", 1)[-1] if "-" in slug else slug
+        project_name = project_display_name(slug, getattr(entry, "project_path", None))
         header = f"# Chronicle: {project_name}\n\n"
         timeline = f"{_TIMELINE_HEADER}\n{_TIMELINE_SEP}\n{table_row}\n{_TIMELINE_END}\n\n{_DETAIL_START}\n\n"
         _atomic_write(chronicle_file, header + timeline + detail_section)
@@ -540,8 +568,16 @@ def _retrofit_timeline(chronicle_file, existing: str):
             row = f"| {ts} | {title} | {n_decisions} | {summary} |"
         rows.append(row)
 
-    # Find where the header ends (after "# Chronicle: ..." line)
-    header_end = existing.index("\n", existing.index("# ")) + 1
+    # Find where the header ends (after "# Chronicle: ..." line). Use find()
+    # (not index(), which raises) so a malformed old chronicle.md — no "# "
+    # heading, or a single "# Chronicle: x" line with no trailing newline —
+    # retrofits cleanly instead of crashing the whole append.
+    hdr_pos = existing.find("# ")
+    if hdr_pos == -1:
+        header_end = 0
+    else:
+        nl = existing.find("\n", hdr_pos)
+        header_end = (nl + 1) if nl != -1 else len(existing)
     header = existing[:header_end]
     body = existing[header_end:].lstrip("\n")
 

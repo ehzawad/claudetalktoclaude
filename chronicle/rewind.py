@@ -18,7 +18,10 @@ import sys
 from pathlib import Path
 
 
-from .config import projects_dir, project_slug_for
+from .config import (
+    projects_dir, project_slug_for, project_display_name,
+    project_name_matches, recover_project_path,
+)
 
 
 def _find_project_dir(project: str | None = None) -> Path | None:
@@ -27,9 +30,9 @@ def _find_project_dir(project: str | None = None) -> Path | None:
         return None
 
     if project:
-        # Partial match on slug
+        # Partial match on slug, accepting the displayed basename too
         for d in sorted(projects_dir().iterdir()):
-            if d.is_dir() and project in d.name:
+            if d.is_dir() and project_name_matches(project, d.name):
                 return d
         return None
 
@@ -40,10 +43,11 @@ def _find_project_dir(project: str | None = None) -> Path | None:
     if candidate.exists():
         return candidate
 
-    # Try partial match on the last component
+    # Try partial match on the last component. Guard against an empty basename
+    # (e.g. cwd == "/"), which would substring-match every project dir.
     dir_name = os.path.basename(cwd)
     for d in sorted(projects_dir().iterdir()):
-        if d.is_dir() and dir_name in d.name:
+        if d.is_dir() and dir_name and dir_name in d.name:
             return d
 
     return None
@@ -123,7 +127,7 @@ def _load_sessions(project_dir: Path) -> list[dict]:
 
 def show_session_list(sessions: list[dict], project_dir: Path):
     """Display numbered session list — the rewind menu."""
-    project_name = project_dir.name.rsplit("-", 1)[-1] if "-" in project_dir.name else project_dir.name
+    project_name = project_display_name(project_dir.name, recover_project_path(project_dir))
     print(f"  Chronicle: {project_name} ({len(sessions)} sessions)\n")
     print(f"  {'#':>3}  {'Date':16}  {'Turns':>5}  {'Dec':>3}  Title")
     print(f"  {'─'*3}  {'─'*16}  {'─'*5}  {'─'*3}  {'─'*50}")
@@ -411,7 +415,7 @@ def main():
 
     sessions = _load_sessions(project_dir)
     if not sessions:
-        print(f"No session records in {project_dir.name}.")
+        print(f"No session records in {project_display_name(project_dir.name, recover_project_path(project_dir))}.")
         sys.exit(1)
 
     if args.delete is not None:

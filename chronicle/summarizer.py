@@ -630,15 +630,13 @@ def entry_to_session_markdown(entry: ChronicleEntry) -> str:
             lines.append(f"- `{f}`")
         lines.append("")
 
-    # Turn-by-turn chronological log. Fence with FOUR backticks: tool output
-    # is no longer size-capped and can itself contain ``` fences, which would
-    # otherwise close the block early and corrupt the markdown.
+    # Turn-by-turn chronological log. The log renders full tool inputs/outputs
+    # inside their own collapsible fenced blocks; do not wrap the whole section
+    # in one fence or those blocks would become inert text.
     if entry.turn_log:
         lines.append("## Turn-by-turn log")
         lines.append("")
-        lines.append("````")
         lines.append(entry.turn_log)
-        lines.append("````")
         lines.append("")
 
     # User prompts (verbatim) at the end as reference

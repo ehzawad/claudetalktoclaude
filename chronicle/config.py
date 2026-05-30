@@ -188,6 +188,93 @@ def project_slug_for(cwd: str, transcript_path: str | None = None) -> str:
     return re.sub(r"[^A-Za-z0-9]", "-", normalized)
 
 
+def project_display_name(slug: str, project_path: str | None = None) -> str:
+    """Human-facing project name for a storage slug.
+
+    Never returns the raw leading-dash slug (the literal complaint) and never
+    the lossy last segment (`slug.rsplit('-',1)[-1]`, which dropped the
+    `codex-` of `codex-council` and collided distinct projects).
+
+    The slug mirrors Claude Code's ~/.claude/projects dir name: every
+    non-alphanumeric char of the absolute cwd becomes '-', runs NOT collapsed,
+    so it always begins with '-' (from the leading '/') and is irreversible — a
+    '-' may originally have been '/', '-', '.', or '_'. So:
+
+    - When the real cwd is known (`project_path`), use its true basename. This
+      is correct even for folders whose names contain '-', '.', or '_'.
+    - Otherwise strip EXACTLY the one leading root dash. Not `lstrip('-')`,
+      which would also eat the meaningful '--' that a leading-dot dir like
+      '/.config' produces ('--config' -> wrongly 'config').
+    """
+    # Only trust a real, absolute cwd (the only sources — Claude Code's `cwd`
+    # and recover_project_path's stored value — are always absolute). A slug or
+    # any relative/garbage string passed here has no leading '/', so it falls
+    # through to slug handling instead of becoming a bogus "basename".
+    if project_path and project_path.startswith("/"):
+        name = Path(project_path).name
+        if name and name not in (".", ".."):
+            return name
+    if slug.startswith("-"):
+        return slug[1:] or slug
+    return slug or "(unknown project)"
+
+
+def recover_project_path(project_dir: Path) -> str | None:
+    """Best-effort recovery of a project's real cwd from its stored records.
+
+    Slug-only display sites (rewind menu, story, insight, `query show`) can't
+    derive the true folder basename from the irreversible slug, but every
+    session record persists `**Project**: <path>` (see summarizer
+    entry_to_session_markdown). Read the newest sessions/*.md and return that
+    path so those single-project views can show the real basename. Returns None
+    when no record carries a usable path (e.g. a pending, unprocessed project),
+    in which case callers fall back to the de-dashed slug."""
+    sessions = project_dir / "sessions"
+    if not sessions.is_dir():
+        return None
+    for md in sorted(sessions.glob("*.md"), reverse=True):
+        try:
+            text = md.read_text(errors="ignore")
+        except OSError:
+            continue
+        # Anchor the value to the SAME line: [ \t]* (not \s*, which would eat the
+        # newline) and require a non-space first char, so an empty "**Project**: "
+        # (written when a transcript carries no cwd) yields no match -> None ->
+        # de-dashed-slug fallback, instead of capturing the next content line.
+        m = re.search(r"^\*\*Project\*\*:[ \t]*(\S.*)$", text, re.MULTILINE)
+        if m:
+            path = m.group(1).strip()
+            # Only trust the path if it actually belongs to THIS slug — a copied
+            # or restored session record could carry another project's cwd, which
+            # would otherwise display the wrong basename.
+            if path and project_slug_for(path) == project_dir.name:
+                return path
+    return None
+
+
+def project_name_matches(query: str, slug: str) -> bool:
+    """True if a user-typed project name should resolve to this storage slug.
+
+    Lookups historically substring-match the raw slug. Once we display the real
+    folder basename, a user may type a name containing '_', '.', or spaces
+    (e.g. 'my_proj', '.config') that never appears literally in the slug (which
+    holds 'my-proj', '-config'). Match the raw query AND its slugified form so
+    whatever name the user can SEE is also a name they can type. Purely
+    additive: every match that worked before still works."""
+    query = query.strip()
+    if not query:
+        return False
+    if query in slug:
+        return True
+    slugged = re.sub(r"[^A-Za-z0-9]", "-", query)
+    # A punctuation-only query ('.', '/', '_', ' ') slugifies to bare dashes,
+    # which substring-match EVERY slug and would silently select the first
+    # project. Require real alphanumeric content before the slugified match.
+    if not slugged.strip("-"):
+        return False
+    return slugged in slug
+
+
 # ---------- PEP 562 lazy-constant compat shim ----------
 # Kept for external code that might do `chronicle.config.CHRONICLE_DIR`.
 # Internal code should use the function form above.

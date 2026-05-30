@@ -137,19 +137,26 @@ flowchart LR
 ```bash
 chronicle query projects              # per-project OK / Pend / Fail counts
 chronicle query timeline --limit 20    # recent sessions across all projects
-chronicle query timeline --project api # recent sessions matching a slug
-chronicle query sessions [PATH]        # current or named project's chronicle
+chronicle query timeline --project api # recent sessions matching a project
+chronicle query sessions [PATH|--project NAME]  # a project's chronicle (default: cwd)
 chronicle query search "auth"          # full-text across all chronicles
 chronicle query search "auth" --project api
-chronicle query <project-name>         # shortcut: show matching project
+chronicle query show <project-name>    # show a project's chronicle by name
+chronicle query <project-name>         # shortcut for `query show`
 ```
+
+Project names are matched by the folder **basename** you see (e.g. `codex-council`,
+`my_proj`) as well as any substring of the stored slug — whatever name a command
+prints back is a name you can type. Lists (`projects`, `timeline`) show the
+de-dashed slug to disambiguate same-named folders; single-project views show the
+folder basename.
 
 ### Process (summarize sessions)
 
 ```bash
 chronicle process --workers 5                  # pending sessions
 chronicle batch --workers 5                    # alias for process
-chronicle process --project slug               # substring match against slug
+chronicle process --project NAME               # match by basename or slug substring
 chronicle process --force --workers 5          # reprocess successes
 chronicle process --retry-failed --workers 5   # retry terminal failures
 chronicle process --dry-run                    # preview only
@@ -451,7 +458,9 @@ Default paths below use `~/.chronicle/`; set `CHRONICLE_HOME` to move Chronicle'
 
 ### What gets captured in session `.md`
 
-Turn-by-turn log · decisions with status + rationale + alternatives · problems solved (symptom/diagnosis/fix/verification) · developer reasoning moments · follow-up questions · architecture patterns · planning evolution · technical details (stack, errors, commands, config) · notable activity for Agent Teams/tasks/workflows/MCP/new tools · tags and unknown structured extras · per-session cost.
+LLM-structured fields: decisions with status + rationale + alternatives · problems solved (symptom/diagnosis/fix/verification) · developer reasoning moments · follow-up questions · architecture patterns · planning evolution · technical details (stack, errors, commands, config) · notable activity for Agent Teams/tasks/workflows/MCP/new tools · tags and unknown structured extras · per-session cost.
+
+**Full, untruncated archive.** A chronicle is a *complete* record — the turn-by-turn log preserves every tool call's **full** input and **full** output verbatim, no matter how large (full Bash commands, complete Edit/Write/MultiEdit diffs, entire subagent prompts, whole MCP payloads, complete tool output). Nothing is clipped. Long bodies are wrapped in collapsible `<details>` blocks with dynamically-sized backtick fences (always longer than any backtick run inside the content) so embedded code fences can never corrupt the markdown, and they stay scannable via a compact one-line index above each block. Secret redaction still runs on every captured field before anything is written. The only compact-by-design surfaces are the per-project `chronicle.md` **timeline table** (a navigational index whose full title/summary live in the detail section directly below) — every byte of actual history is retained in full.
 
 ---
 
@@ -539,3 +548,14 @@ chronicle/
 ```
 
 Tests: `tests/unit/` (per-module) + `tests/functional/` (subprocess-level end-to-end with a fake `claude` stub). Runs in a few seconds — see `pytest -q` for the current count.
+
+### Building from source
+
+End users never need Python — the released artifact is a self-contained PyInstaller binary. Contributors do: Chronicle targets **Python 3.14** (the version the release workflow builds and tests against; `requires-python = ">=3.14"`).
+
+```bash
+python3.14 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"     # editable install + pytest
+pytest -q                   # run the suite
+python -m chronicle --help  # run the CLI from source
+```

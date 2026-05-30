@@ -196,11 +196,16 @@ class TestProcess:
 
     def test_process_project_filter(self, cli):
         home, bin_dir, _ = cli
-        _seed_jsonl(home / ".claude" / "projects", "-tmp-alpha", str(uuid.uuid4()))
-        _seed_jsonl(home / ".claude" / "projects", "-tmp-beta", str(uuid.uuid4()))
+        sid_alpha = str(uuid.uuid4())
+        sid_beta = str(uuid.uuid4())
+        _seed_jsonl(home / ".claude" / "projects", "-tmp-alpha", sid_alpha)
+        _seed_jsonl(home / ".claude" / "projects", "-tmp-beta", sid_beta)
         r = _run(["process", "--project", "alpha", "--dry-run"], home=home, bin_dir=bin_dir)
         assert r.returncode == 0
-        assert "alpha" in r.stdout and "beta" not in r.stdout
+        # --project alpha must select only the alpha session, not beta. Assert on
+        # the stable session id rather than the display name (which is now the
+        # cwd basename, not the raw slug).
+        assert sid_alpha[:8] in r.stdout and sid_beta[:8] not in r.stdout
 
     def test_process_workers_zero_does_not_hang(self, cli):
         home, bin_dir, _ = cli
@@ -225,7 +230,8 @@ class TestQuery:
         _run(["process", "--workers", "1"], home=home, bin_dir=bin_dir)
         r = _run(["query", "projects"], home=home, bin_dir=bin_dir)
         assert r.returncode == 0
-        assert "-tmp-q" in r.stdout and "Total" in r.stdout
+        # The project list shows the de-dashed slug (cross-project disambiguation).
+        assert "tmp-q" in r.stdout and "Total" in r.stdout
 
     def test_query_projects_canonical_id_divergent(self, cli):
         # BUG-20: filename stem != in-file sessionId; query projects must count
@@ -251,8 +257,8 @@ class TestQuery:
             capture_output=True, text=True)
         assert sub.returncode == 0, sub.stderr
         r = _run(["query", "projects"], home=home, bin_dir=bin_dir)
-        # the slug row should show OK 1, not Pend 1
-        row = [l for l in r.stdout.splitlines() if slug in l]
+        # the slug row should show OK 1, not Pend 1 (list shows de-dashed slug)
+        row = [l for l in r.stdout.splitlines() if slug.lstrip("-") in l]
         assert row and " 1 " in row[0].replace("  ", " "), f"expected OK=1: {row}"
 
     def test_query_timeline_and_search(self, cli):

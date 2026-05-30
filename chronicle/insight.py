@@ -22,7 +22,10 @@ from collections import Counter
 from pathlib import Path
 
 from .claude_cli import spawn_claude
-from .config import projects_dir, load_config, project_slug_for
+from .config import (
+    projects_dir, load_config, project_slug_for,
+    project_display_name, project_name_matches, recover_project_path,
+)
 
 
 def _find_project(name: str | None) -> Path | None:
@@ -32,7 +35,7 @@ def _find_project(name: str | None) -> Path | None:
 
     if name:
         matches = [d for d in sorted(projects_dir().iterdir())
-                    if d.is_dir() and name in d.name]
+                    if d.is_dir() and project_name_matches(name, d.name)]
         return matches[0] if matches else None
 
     cwd = os.getcwd()
@@ -116,6 +119,7 @@ def _parse_sessions(project_dir: Path) -> list[dict]:
 def _build_data_payload(project_dir: Path, sessions: list[dict]) -> dict:
     """Aggregate session data into a structured payload for the LLM."""
     slug = project_dir.name
+    display_name = project_display_name(slug, recover_project_path(project_dir))
     total_turns = sum(s["turns"] for s in sessions)
     total_cost = sum(s["cost"] for s in sessions)
     total_decisions = sum(len(s["decisions"]) for s in sessions)
@@ -144,6 +148,7 @@ def _build_data_payload(project_dir: Path, sessions: list[dict]) -> dict:
 
     return {
         "project_slug": slug,
+        "project_name": display_name,
         "session_count": len(sessions),
         "total_turns": total_turns,
         "total_cost_usd": total_cost,
@@ -180,7 +185,7 @@ complete, self-contained HTML file with inline CSS (no external dependencies) th
 presents a rich, visually appealing analysis of the project.
 
 The HTML should include:
-1. A header with project name, session count, date range, and key stats
+1. A header with the project name (use the `project_name` field, not the raw `project_slug`), session count, date range, and key stats
 2. An executive summary narrative (2-3 paragraphs) synthesizing what this project \
 is about, what the major themes are, and how the work evolved over time
 3. A timeline of sessions with visual indicators for complexity (turns) and decisions
@@ -220,7 +225,7 @@ def generate_insight(project_name: str | None = None):
 
     sessions = _parse_sessions(project_dir)
     if not sessions:
-        print(f"No sessions in {project_dir.name}")
+        print(f"No sessions in {project_display_name(project_dir.name, recover_project_path(project_dir))}")
         return
 
     payload = _build_data_payload(project_dir, sessions)
@@ -231,7 +236,7 @@ def generate_insight(project_name: str | None = None):
     fallback = config.get("fallback_model")
     effort = config.get("effort")
 
-    print(f"  Generating insight for {project_dir.name} "
+    print(f"  Generating insight for {project_display_name(project_dir.name, recover_project_path(project_dir))} "
           f"({len(sessions)} sessions)...")
 
     async def _generate():
@@ -250,12 +255,16 @@ def generate_insight(project_name: str | None = None):
         print("  Failed to generate insight.")
         return
 
-    # Extract HTML from result (strip any markdown fences if present)
+    # Extract HTML from result (strip any markdown fences if present).
+    # Use .find() (not .index(), which raises) and only strip when a real
+    # closing fence follows the first line — otherwise a fence-without-newline
+    # would crash and a fence-without-close would truncate to empty.
     html = result.strip()
     if html.startswith("```"):
-        first_newline = html.index("\n")
+        nl = html.find("\n")
         last_fence = html.rfind("```")
-        html = html[first_newline + 1:last_fence].strip()
+        if nl != -1 and last_fence > nl:
+            html = html[nl + 1:last_fence].strip()
 
     # Write HTML file
     output_path = project_dir / "insight.html"

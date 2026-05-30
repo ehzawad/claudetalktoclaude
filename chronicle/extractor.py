@@ -8,11 +8,12 @@ generically so new Claude Code features are never silently dropped.
 
 Two output formats, both uncapped (the whole session is kept) with secrets
 masked in commands, tool inputs, and tool outputs:
-- digest_to_text():  interleaved timeline with one-liner tool summaries, fed
-  to claude -p for summarization.
+- digest_to_text():  interleaved timeline with one-liner tool indexes plus
+  full redacted tool inputs, fed to claude -p for summarization.
 - timeline_to_log(): full chronological log for the archival session markdown.
 """
 
+import html
 import json
 import re
 from dataclasses import dataclass, field
@@ -30,11 +31,12 @@ class UserPrompt:
 class ToolDetail:
     """Rich detail about a tool call for the archival record.
 
-    Some tool families store selected or truncated inputs to keep logs useful
-    without dumping bulky or sensitive payloads.
+    input stores the full redacted tool input dump. The other fields are
+    structured conveniences for readable one-line indexes and focused blocks.
     """
     tool: str
     summary: str  # one-liner for the LLM prompt
+    input: str = ""  # full redacted tool input
     path: str = ""
     command: str = ""
     content: str = ""  # Write content or Edit new_string
@@ -139,12 +141,65 @@ _SENSITIVE_PATHS = re.compile(
     re.IGNORECASE,
 )
 
+_SENSITIVE_INPUT_KEYS = re.compile(
+    r"api[_-]?key|secret|token|password|credential|auth|private[_-]?key|access[_-]?key",
+    re.IGNORECASE,
+)
+
 
 def _redact_secrets(text: str) -> str:
     """Replace known secret patterns with [REDACTED]."""
     if not text:
         return text
     return _SECRET_PATTERNS.sub("[REDACTED]", text)
+
+
+def _sensitive_file_placeholder(path: str) -> str:
+    """Placeholder for content whose path is sensitive even without a token hit."""
+    return f"[REDACTED — sensitive file: {Path(path).name}]"
+
+
+def _redacted_tool_input(inp: dict) -> str:
+    """Return a full redacted dump of a tool input dictionary.
+
+    Full input archival is separate from the compact one-line summary. For
+    sensitive paths, redact payload-bearing fields before the broader pattern
+    scanner runs so removing length caps cannot reveal content that the old cap
+    merely happened not to reach.
+    """
+    safe_inp = inp
+    path = str(inp.get("file_path") or inp.get("notebook_path") or "")
+    if path and _SENSITIVE_PATHS.search(path):
+        safe_inp = dict(inp)
+        placeholder = _sensitive_file_placeholder(path)
+        for key in ("content", "old_string", "new_string", "new_source"):
+            if key in safe_inp:
+                safe_inp[key] = placeholder
+        if "edits" in safe_inp:
+            safe_inp["edits"] = placeholder
+    try:
+        dumped = json.dumps(safe_inp, ensure_ascii=False)
+    except (TypeError, ValueError):
+        dumped = str(safe_inp)
+    return _redact_secrets(dumped)
+
+
+def _redact_input_value_for_key(key: str, value) -> str:
+    if _SENSITIVE_INPUT_KEYS.search(str(key)):
+        return "[REDACTED]"
+    return _redact_secrets(str(value))
+
+
+def _index_snippet(text: str, limit: int = 120) -> str:
+    """Compact text for one-line indexes only.
+
+    The archival copy is kept separately in ToolDetail.input/content fields and
+    rendered in fenced details blocks.
+    """
+    one_line = " ".join(str(text).split())
+    if len(one_line) <= limit:
+        return one_line
+    return one_line[:max(0, limit - 3)].rstrip() + "..."
 
 
 # Patterns to skip in user messages (system-injected content)
@@ -219,17 +274,24 @@ def _extract_tool(block: dict) -> tuple[str | None, ToolDetail | None]:
     if name in _CANON:
         name = _CANON[name]
 
+    full_input = _redacted_tool_input(inp)
+
     if name == "Bash":
         cmd = _redact_secrets(inp.get("command", ""))
-        return f"Bash: {cmd[:120]}", ToolDetail(
-            tool="Bash", summary=f"Bash: {cmd[:120]}", command=cmd)
+        summary = f"Bash: {_index_snippet(cmd, 120)}"
+        return summary, ToolDetail(
+            tool="Bash", summary=summary, input=full_input, command=cmd)
 
     elif name == "Edit":
         path = inp.get("file_path", "")
-        old = _redact_secrets(inp.get("old_string", ""))
-        new = _redact_secrets(inp.get("new_string", ""))
+        if _SENSITIVE_PATHS.search(path):
+            old = _sensitive_file_placeholder(path)
+            new = _sensitive_file_placeholder(path)
+        else:
+            old = _redact_secrets(inp.get("old_string", ""))
+            new = _redact_secrets(inp.get("new_string", ""))
         return f"Edit: {path}", ToolDetail(
-            tool="Edit", summary=f"Edit: {path}", path=path,
+            tool="Edit", summary=f"Edit: {path}", input=full_input, path=path,
             old_content=old, content=new)
 
     elif name == "Write":
@@ -237,43 +299,48 @@ def _extract_tool(block: dict) -> tuple[str | None, ToolDetail | None]:
         content = inp.get("content", "")
         # Fully redact content for sensitive file types
         if _SENSITIVE_PATHS.search(path):
-            content = f"[REDACTED — sensitive file: {Path(path).name}]"
+            content = _sensitive_file_placeholder(path)
         else:
             content = _redact_secrets(content)
         return f"Write: {path}", ToolDetail(
-            tool="Write", summary=f"Write: {path}", path=path, content=content)
+            tool="Write", summary=f"Write: {path}", input=full_input,
+            path=path, content=content)
 
     elif name == "Read":
         path = inp.get("file_path", "")
         return f"Read: {path}", ToolDetail(
-            tool="Read", summary=f"Read: {path}", path=path)
+            tool="Read", summary=f"Read: {path}", input=full_input, path=path)
 
     elif name in ("Glob", "Grep"):
         pattern = _redact_secrets(inp.get("pattern", ""))
         return f"{name}: {pattern}", ToolDetail(
-            tool=name, summary=f"{name}: {pattern}", query=pattern)
+            tool=name, summary=f"{name}: {pattern}", input=full_input,
+            query=pattern)
 
     elif name == "Agent":
         desc = _redact_secrets(inp.get("description", ""))
         prompt = _redact_secrets(inp.get("prompt", ""))
         return f"Agent: {desc}", ToolDetail(
-            tool="Agent", summary=f"Agent: {desc}",
-            description=desc, content=prompt[:500])
+            tool="Agent", summary=f"Agent: {desc}", input=full_input,
+            description=desc, content=prompt)
 
     elif name == "Skill":
         skill = inp.get("skill", "")
         return f"Skill: {skill}", ToolDetail(
-            tool="Skill", summary=f"Skill: {skill}", query=skill)
+            tool="Skill", summary=f"Skill: {skill}", input=full_input,
+            query=skill)
 
     elif name == "WebSearch":
         query = _redact_secrets(inp.get("query", ""))
         return f"WebSearch: {query}", ToolDetail(
-            tool="WebSearch", summary=f"WebSearch: {query}", query=query)
+            tool="WebSearch", summary=f"WebSearch: {query}", input=full_input,
+            query=query)
 
     elif name == "WebFetch":
         url = _redact_secrets(inp.get("url", ""))
         return f"WebFetch: {url}", ToolDetail(
-            tool="WebFetch", summary=f"WebFetch: {url}", query=url)
+            tool="WebFetch", summary=f"WebFetch: {url}", input=full_input,
+            query=url)
 
     elif name == "MultiEdit":
         path = inp.get("file_path", "")
@@ -281,7 +348,7 @@ def _extract_tool(block: dict) -> tuple[str | None, ToolDetail | None]:
         count = len(edits)
         return f"MultiEdit: {path} ({count} regions)", ToolDetail(
             tool="MultiEdit", summary=f"MultiEdit: {path} ({count} regions)",
-            path=path, content=f"{count} edit regions")
+            input=full_input, path=path, content=f"{count} edit regions")
 
     elif name in ("TaskCreate", "TaskUpdate", "TaskList", "TaskStop"):
         # Agent Teams / task tracking (first-class CLI feature). Surface the
@@ -292,21 +359,21 @@ def _extract_tool(block: dict) -> tuple[str | None, ToolDetail | None]:
         task_id = str(inp.get("taskId") or inp.get("id") or "")
         status = str(inp.get("status") or "")
         bits = [b for b in (task_id, status) if b]
-        head = subject[:80] if subject else (" ".join(bits) if bits else "")
+        head = _index_snippet(subject, 80) if subject else (" ".join(bits) if bits else "")
         tail = f" -> {status}" if status and subject else ""
         summary = f"{name}: {head}{tail}".rstrip(": ").rstrip()
         return summary, ToolDetail(
-            tool=name, summary=summary,
-            description=subject, content=_redact_secrets(str(inp))[:500])
+            tool=name, summary=summary, input=full_input,
+            description=subject, content=full_input)
 
     elif name == "Workflow":
         # Dynamic workflows. Capture the workflow name / first script line.
         wf = _redact_secrets(str(
             inp.get("name") or inp.get("workflow") or inp.get("script") or ""))
-        summary = f"Workflow: {wf[:100]}".rstrip(": ").rstrip()
+        summary = f"Workflow: {_index_snippet(wf, 100)}".rstrip(": ").rstrip()
         return summary, ToolDetail(
-            tool="Workflow", summary=summary,
-            content=_redact_secrets(str(inp))[:500])
+            tool="Workflow", summary=summary, input=full_input,
+            content=full_input)
 
     elif name == "AskUserQuestion":
         # Interactive question. Flatten the question text(s).
@@ -316,19 +383,24 @@ def _extract_tool(block: dict) -> tuple[str | None, ToolDetail | None]:
             first = questions[0]
             qtext = first.get("question", "") if isinstance(first, dict) else str(first)
         qtext = _redact_secrets(qtext or str(inp.get("question") or ""))
-        summary = f"AskUserQuestion: {qtext[:100]}".rstrip(": ").rstrip()
+        summary = f"AskUserQuestion: {_index_snippet(qtext, 100)}".rstrip(": ").rstrip()
         return summary, ToolDetail(
-            tool="AskUserQuestion", summary=summary,
-            content=_redact_secrets(str(inp))[:500])
+            tool="AskUserQuestion", summary=summary, input=full_input,
+            content=full_input)
 
     elif name == "NotebookEdit":
         path = inp.get("notebook_path", "") or inp.get("file_path", "")
         cell = inp.get("cell_type", "")
         suffix = f" ({cell})" if cell else ""
         summary = f"NotebookEdit: {path}{suffix}"
+        content = str(inp.get("new_source") or inp.get("content") or "")
+        if _SENSITIVE_PATHS.search(path):
+            content = _sensitive_file_placeholder(path)
+        else:
+            content = _redact_secrets(content)
         return summary, ToolDetail(
-            tool="NotebookEdit", summary=summary, path=path,
-            content=_redact_secrets(str(inp.get("new_source") or inp.get("content") or "")))
+            tool="NotebookEdit", summary=summary, input=full_input, path=path,
+            content=content)
 
     elif name.startswith("mcp__"):
         parts = name.split("__", 2)
@@ -337,14 +409,15 @@ def _extract_tool(block: dict) -> tuple[str | None, ToolDetail | None]:
         detail_text = ""
         for key in ("query", "libraryId", "libraryName", "url", "prompt"):
             if inp.get(key):
-                detail_text = f" ({_redact_secrets(str(inp[key]))[:80]})"
+                detail_text = f" ({_index_snippet(_redact_secrets(str(inp[key])), 80)})"
                 break
         summary = f"MCP({server}): {tool}{detail_text}"
         query_val = _redact_secrets(
             str(inp.get("query", inp.get("libraryId", "")))
         )
         return summary, ToolDetail(
-            tool=f"MCP({server}): {tool}", summary=summary, query=query_val)
+            tool=f"MCP({server}): {tool}", summary=summary, input=full_input,
+            query=query_val)
 
     else:
         # Unknown / future tool. Claude Code ships new tools daily; rather than
@@ -360,16 +433,16 @@ def _extract_tool(block: dict) -> tuple[str | None, ToolDetail | None]:
         detail_text = ""
         for key in _PROBE_KEYS:
             if inp.get(key):
-                detail_text = f": {_redact_secrets(str(inp[key]))[:80]}"
+                detail_text = f": {_index_snippet(_redact_input_value_for_key(key, inp[key]), 80)}"
                 break
         if not detail_text and isinstance(inp, dict):
             # Generic scalar render: join the first 2 short scalar values.
             scalars = []
-            for v in inp.values():
+            for key, v in inp.items():
                 if isinstance(v, (str, int, float, bool)):
-                    s = _redact_secrets(str(v)).strip()
+                    s = _redact_input_value_for_key(key, v).strip()
                     if s:
-                        scalars.append(s[:60])
+                        scalars.append(_index_snippet(s, 60))
                 if len(scalars) >= 2:
                     break
             if scalars:
@@ -377,7 +450,8 @@ def _extract_tool(block: dict) -> tuple[str | None, ToolDetail | None]:
         summary = f"{name}{detail_text}"
         return summary, ToolDetail(
             tool=name, summary=summary,
-            content=_redact_secrets(str(inp))[:500],
+            input=full_input,
+            content=full_input,
         )
 
 
@@ -412,7 +486,7 @@ def _extract_user_tool_results(content) -> list[str]:
             result_content = block.get("content", "")
             text = _extract_tool_result_text(result_content)
             if text:
-                tool_id = block.get("tool_use_id", "")[:8]
+                tool_id = block.get("tool_use_id", "")
                 results.append(f"[result {tool_id}]: {text}")
     return results
 
@@ -582,9 +656,10 @@ def extract_session(jsonl_path: str) -> SessionDigest:
 def digest_to_text(digest: SessionDigest, max_chars: int | None = None) -> str:
     """Format a digest as an interleaved timeline for the LLM prompt.
 
-    One-liner tool summaries; the whole timeline is included. max_chars is None
-    by default (no size cap) so the entire session is summarized; pass an int to
-    front+tail truncate. claude -p's 10 MiB stdin limit is the only ceiling.
+    One-liner tool indexes plus full redacted tool inputs; the whole timeline is
+    included. max_chars is retained only for call-site compatibility; Chronicle
+    ignores it and imposes no front/tail truncation. claude -p's 10 MiB stdin
+    limit is the only ceiling.
     """
     parts = []
 
@@ -609,22 +684,29 @@ def digest_to_text(digest: SessionDigest, max_chars: int | None = None) -> str:
             timeline_parts.append(f"\n[{ts}] ASSISTANT")
             if turn.text:
                 timeline_parts.append(turn.text)
-            if turn.tool_actions:
+            if turn.tool_actions or turn.tool_details:
                 timeline_parts.append("TOOLS:")
-                prev = None
-                count = 0
+                detail_index = 0
                 for action in turn.tool_actions:
-                    if action == prev:
-                        count += 1
+                    if (
+                        detail_index < len(turn.tool_details)
+                        and action == turn.tool_details[detail_index].summary
+                    ):
+                        detail = turn.tool_details[detail_index]
+                        timeline_parts.append(f"  - {detail.summary}")
+                        if detail.input:
+                            timeline_parts.append("    FULL INPUT:")
+                            for line in detail.input.split("\n"):
+                                timeline_parts.append(f"      {line}")
+                        detail_index += 1
                     else:
-                        if prev is not None:
-                            suffix = f" (x{count})" if count > 1 else ""
-                            timeline_parts.append(f"  - {prev}{suffix}")
-                        prev = action
-                        count = 1
-                if prev is not None:
-                    suffix = f" (x{count})" if count > 1 else ""
-                    timeline_parts.append(f"  - {prev}{suffix}")
+                        timeline_parts.append(f"  - {action}")
+                for detail in turn.tool_details[detail_index:]:
+                    timeline_parts.append(f"  - {detail.summary}")
+                    if detail.input:
+                        timeline_parts.append("    FULL INPUT:")
+                        for line in detail.input.split("\n"):
+                            timeline_parts.append(f"      {line}")
 
         elif turn.role == "tool_result":
             if turn.tool_results:
@@ -640,29 +722,52 @@ def digest_to_text(digest: SessionDigest, max_chars: int | None = None) -> str:
 
     timeline_text = "\n".join(timeline_parts)
 
-    # No size cap by default (max_chars=None): summarize the whole session.
-    if max_chars is not None and len(timeline_text) > max_chars:
-        front_budget = int(max_chars * 0.75)
-        tail_budget = max_chars - front_budget
-        front = timeline_text[:front_budget]
-        tail = timeline_text[-tail_budget:]
-        omitted = len(timeline_text) - max_chars
-        timeline_text = (
-            front
-            + f"\n\n[... {omitted:,} chars from middle of session omitted ...]\n\n"
-            + tail
-        )
-
+    # max_chars is deliberately ignored: Chronicle must not impose its own
+    # transcript truncation before claude -p's stdin limit.
     parts.append(timeline_text)
     return "\n".join(parts)
+
+
+def _markdown_fence(text: str, min_ticks: int = 4) -> str:
+    """Return a backtick fence longer than any backtick run in text."""
+    longest = max((len(m.group(0)) for m in re.finditer(r"`+", text or "")), default=0)
+    return "`" * max(min_ticks, longest + 1)
+
+
+def _detail_size(text: str) -> str:
+    line_count = text.count("\n") + 1 if text else 0
+    line_label = "line" if line_count == 1 else "lines"
+    return f"{len(text):,} chars, {line_count:,} {line_label}"
+
+
+def _append_verbatim_details(lines: list[str], summary: str, content: str) -> None:
+    """Append a collapsible, fenced verbatim block to a markdown line buffer."""
+    if not content:
+        return
+    lines.append(f"<details><summary>{html.escape(summary, quote=False)}</summary>")
+    lines.append("")
+    fence = _markdown_fence(content)
+    lines.append(fence)
+    lines.append(content)
+    lines.append(fence)
+    lines.append("")
+    lines.append("</details>")
+
+
+def _append_tool_input_details(lines: list[str], td: ToolDetail) -> None:
+    if td.input:
+        _append_verbatim_details(
+            lines,
+            f"Full {td.tool} input ({_detail_size(td.input)})",
+            td.input,
+        )
 
 
 def timeline_to_log(digest: SessionDigest) -> str:
     """Generate a full chronological log from the timeline.
 
     No size truncation. Content is extracted/redacted, thinking blocks are
-    skipped, and some tool inputs may be selected/truncated. Human-readable
-    formatting.
+    skipped, and full tool inputs/outputs are kept in collapsible fenced blocks.
     This is the archival record in the session markdown.
     """
     lines = []
@@ -689,49 +794,68 @@ def timeline_to_log(digest: SessionDigest) -> str:
                 if td.tool == "Edit" and td.path:
                     lines.append(f"  EDIT: {td.path}")
                     if td.old_content:
-                        lines.append("    - old:")
-                        for dl in td.old_content.split("\n"):
-                            lines.append(f"      {dl}")
+                        _append_verbatim_details(
+                            lines,
+                            f"Edit old_string ({_detail_size(td.old_content)})",
+                            td.old_content,
+                        )
                     if td.content:
-                        lines.append("    + new:")
-                        for dl in td.content.split("\n"):
-                            lines.append(f"      {dl}")
+                        _append_verbatim_details(
+                            lines,
+                            f"Edit new_string ({_detail_size(td.content)})",
+                            td.content,
+                        )
 
                 elif td.tool == "Write" and td.path:
                     lines.append(f"  WRITE: {td.path}")
                     if td.content:
-                        lines.append("    CONTENT:")
-                        for dl in td.content.split("\n"):
-                            lines.append(f"      {dl}")
+                        _append_verbatim_details(
+                            lines,
+                            f"Write content ({_detail_size(td.content)})",
+                            td.content,
+                        )
 
                 elif td.tool == "Bash":
-                    lines.append(f"  BASH: {td.command}")
+                    lines.append(f"  BASH: {_index_snippet(td.command, 160)}")
 
                 elif td.tool == "Read":
                     lines.append(f"  READ: {td.path}")
 
                 elif td.tool == "Agent":
-                    lines.append(f"  AGENT: {td.description}")
+                    lines.append(f"  AGENT: {_index_snippet(td.description, 160)}")
                     if td.content:
-                        lines.append(f"    prompt: {td.content}")
+                        _append_verbatim_details(
+                            lines,
+                            f"Agent prompt ({_detail_size(td.content)})",
+                            td.content,
+                        )
 
                 elif td.tool in ("Glob", "Grep"):
-                    lines.append(f"  {td.tool.upper()}: {td.query}")
+                    lines.append(f"  {td.tool.upper()}: {_index_snippet(td.query, 160)}")
 
                 elif td.tool in ("WebSearch", "WebFetch", "Skill"):
-                    lines.append(f"  {td.tool.upper()}: {td.query}")
+                    lines.append(f"  {td.tool.upper()}: {_index_snippet(td.query, 160)}")
 
                 elif td.tool.startswith("MCP("):
-                    lines.append(f"  {td.tool}: {td.query}")
+                    suffix = f": {_index_snippet(td.query, 160)}" if td.query else ""
+                    lines.append(f"  {td.tool}{suffix}")
 
                 else:
                     lines.append(f"  {td.summary}")
 
+                _append_tool_input_details(lines, td)
+
         elif turn.role == "tool_result":
             for result in turn.tool_results:
                 lines.append(f"\n[{ts}] TOOL OUTPUT:")
-                for line in result.split("\n"):
-                    lines.append(f"  {line}")
+                first_line = result.splitlines()[0] if result.splitlines() else ""
+                if first_line:
+                    lines.append(f"  {_index_snippet(first_line, 160)}")
+                _append_verbatim_details(
+                    lines,
+                    f"Full tool output ({_detail_size(result)})",
+                    result,
+                )
 
         elif turn.text:
             # Unknown / future role: label it generically so the archival log

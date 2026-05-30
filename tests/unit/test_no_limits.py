@@ -50,10 +50,10 @@ class TestDigestNoSizeCap:
         assert "omitted" not in out
         assert ("x" * 200_000) in out
 
-    def test_truncates_only_when_max_chars_given(self):
+    def test_max_chars_is_ignored(self):
         out = extractor.digest_to_text(self._digest_with(200_000), max_chars=50_000)
-        assert "omitted" in out
-        assert len(out) < 100_000
+        assert "omitted" not in out
+        assert ("x" * 200_000) in out
 
 
 class TestStdinCapGuard:

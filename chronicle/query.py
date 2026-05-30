@@ -20,7 +20,10 @@ import shlex
 import sys
 from pathlib import Path
 
-from .config import projects_dir, project_slug_for
+from .config import (
+    projects_dir, project_slug_for, project_display_name,
+    project_name_matches, recover_project_path,
+)
 from .extractor import _session_id_from_jsonl
 
 
@@ -38,7 +41,7 @@ def search(query: str, project: str | None = None):
         # Filter on the project slug (the dir under projects/), not the full
         # path — else a common substring (e.g. "projects") matches everything.
         slug = md_file.relative_to(projects_dir()).parts[0]
-        if project and project not in slug:
+        if project and not project_name_matches(project, slug):
             continue
 
         content = md_file.read_text()
@@ -80,7 +83,7 @@ def timeline(limit: int = 20, project: str | None = None):
     for session_file in projects_dir().rglob("sessions/*.md"):
         # Filter on the project slug, not the full filesystem path (BUG-17).
         slug = session_file.parent.parent.name
-        if project and project not in slug:
+        if project and not project_name_matches(project, slug):
             continue
         content = session_file.read_text()
         # Extract date — handles both "**Date**: X" and "**Date**: X |" formats
@@ -108,7 +111,7 @@ def timeline(limit: int = 20, project: str | None = None):
             summary_match = re.search(r"## What happened\n\n(.+?)(?:\n\n|\Z)", content, re.DOTALL)
         summary = summary_match.group(1).strip()[:150] if summary_match else ""
 
-        print(f"  [{date_str}] {proj}")
+        print(f"  [{date_str}] {project_display_name(proj)}")
         print(f"    Session {title}")
         if summary:
             print(f"    {summary}")
@@ -128,7 +131,7 @@ def sessions(project_path: str | None = None):
     # matches "-home-synesis-codex-opinion")
     if not project_dir.exists() and projects_dir().exists() and project_path:
         matches = [d for d in sorted(projects_dir().iterdir())
-                    if d.is_dir() and project_path in d.name]
+                    if d.is_dir() and project_name_matches(project_path, d.name)]
         if matches:
             project_dir = matches[0]
             slug = project_dir.name
@@ -144,7 +147,7 @@ def sessions(project_path: str | None = None):
         claude_sessions = claude_projects / slug
         if not claude_sessions.exists() and claude_projects.exists() and project_path:
             matches = [d for d in sorted(claude_projects.iterdir())
-                        if d.is_dir() and project_path in d.name]
+                        if d.is_dir() and project_name_matches(project_path, d.name)]
             if matches:
                 claude_sessions = matches[0]
         if claude_sessions.exists():
@@ -213,7 +216,7 @@ def show_project(name: str):
     for project_dir in sorted(projects_dir().iterdir()):
         if not project_dir.is_dir():
             continue
-        if name in project_dir.name:
+        if project_name_matches(name, project_dir.name):
             matches.append(project_dir)
 
     if not matches:
@@ -221,12 +224,12 @@ def show_project(name: str):
         claude_projects = Path.home() / ".claude" / "projects"
         if claude_projects.exists():
             pending = [d for d in claude_projects.iterdir()
-                       if d.is_dir() and name in d.name
+                       if d.is_dir() and project_name_matches(name, d.name)
                        and list(d.glob("*.jsonl"))]
             if pending:
                 for d in pending:
                     count = len(list(d.glob("*.jsonl")))
-                    print(f"  {d.name}: {count} session(s) not yet processed")
+                    print(f"  {project_display_name(d.name)}: {count} session(s) not yet processed")
                 print(f"\nProcess with: chronicle process --workers 5")
                 return
         print(f"No chronicles found matching '{name}'.")
@@ -237,7 +240,8 @@ def show_project(name: str):
         chronicle_file = project_dir / "chronicle.md"
         session_count = len(list(sessions_dir.glob("*.md"))) if sessions_dir.exists() else 0
 
-        print(f"Project: {project_dir.name} ({session_count} sessions)")
+        display = project_display_name(project_dir.name, recover_project_path(project_dir))
+        print(f"Project: {display} ({session_count} sessions)")
         if chronicle_file.exists():
             print(f"  Chronicle: vim {chronicle_file}\n")
 
@@ -312,7 +316,10 @@ def list_projects():
     for slug, p, pe, f in rows:
         if p + pe + f == 0:
             continue
-        short = slug if len(slug) <= 50 else slug[:47] + "..."
+        # Cross-project list: de-dashed slug disambiguates better than a bare
+        # basename (two projects can share a folder name).
+        disp = project_display_name(slug)
+        short = disp if len(disp) <= 50 else disp[:47] + "..."
         print(f"  {short:50}  {p:>4}  {pe:>4}  {f:>4}")
     print(f"  {'─' * 50}  {'─' * 4}  {'─' * 4}  {'─' * 4}")
     print(f"  {'Total':50}  {totals['processed']:>4}  "
@@ -339,12 +346,17 @@ def main():
     timeline_p.add_argument("--project", help="Filter to project")
 
     sessions_p = subparsers.add_parser("sessions", help="Sessions for current project")
-    sessions_p.add_argument("path", nargs="?", help="Project path (default: current dir)")
+    sessions_p.add_argument("path", nargs="?", help="Project path or name (default: current dir)")
+    sessions_p.add_argument("--project", help="Project name (alias for the positional)")
 
     subparsers.add_parser("projects", help="List chronicled projects")
 
+    show_p = subparsers.add_parser("show", help="Show a project's chronicle by name")
+    show_p.add_argument("name", help="Project name (slug substring or folder basename)")
+
     # If the first arg isn't a known subcommand, treat it as a project name
-    known = {"search", "timeline", "sessions", "projects", "-h", "--help"}
+    # (the `chronicle query <name>` shortcut documented in the README).
+    known = {"search", "timeline", "sessions", "projects", "show", "-h", "--help"}
     if len(sys.argv) > 1 and sys.argv[1] not in known:
         project_name = sys.argv[1]
         show_project(project_name)
@@ -357,9 +369,11 @@ def main():
     elif args.command == "timeline":
         timeline(args.limit, getattr(args, "project", None))
     elif args.command == "sessions":
-        sessions(getattr(args, "path", None))
+        sessions(getattr(args, "project", None) or getattr(args, "path", None))
     elif args.command == "projects":
         list_projects()
+    elif args.command == "show":
+        show_project(args.name)
     else:
         parser.print_help()
 

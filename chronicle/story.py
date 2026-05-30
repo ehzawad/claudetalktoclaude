@@ -19,7 +19,10 @@ import sys
 from pathlib import Path
 
 from .claude_cli import spawn_claude
-from .config import projects_dir, load_config, project_slug_for
+from .config import (
+    projects_dir, load_config, project_slug_for,
+    project_display_name, project_name_matches, recover_project_path,
+)
 
 
 def _find_project(name: str | None) -> Path | None:
@@ -27,7 +30,7 @@ def _find_project(name: str | None) -> Path | None:
         return None
     if name:
         matches = [d for d in sorted(projects_dir().iterdir())
-                    if d.is_dir() and name in d.name]
+                    if d.is_dir() and project_name_matches(name, d.name)]
         return matches[0] if matches else None
     cwd = os.getcwd()
     slug = project_slug_for(cwd)
@@ -107,7 +110,7 @@ def generate_story(project_name: str | None = None):
 
     session_pairs = _load_session_content(project_dir)
     if not session_pairs:
-        print(f"No sessions in {project_dir.name}")
+        print(f"No sessions in {project_display_name(project_dir.name, recover_project_path(project_dir))}")
         return
 
     # Build the session content block
@@ -123,7 +126,7 @@ def generate_story(project_name: str | None = None):
     fallback = config.get("fallback_model")
     effort = config.get("effort")
 
-    print(f"  Generating story for {project_dir.name} "
+    print(f"  Generating story for {project_display_name(project_dir.name, recover_project_path(project_dir))} "
           f"({len(session_pairs)} sessions)...")
 
     async def _generate():
@@ -145,12 +148,14 @@ def generate_story(project_name: str | None = None):
         return
 
     md = result.strip()
-    # Strip markdown fences if the model wrapped it
+    # Strip markdown fences if the model wrapped it. Use .find() (not .index(),
+    # which raises ValueError on a fence with no newline) and only strip when a
+    # real closing fence follows the first line.
     if md.startswith("```"):
-        first_newline = md.index("\n")
+        nl = md.find("\n")
         last_fence = md.rfind("```")
-        if last_fence > first_newline:
-            md = md[first_newline + 1:last_fence].strip()
+        if nl != -1 and last_fence > nl:
+            md = md[nl + 1:last_fence].strip()
 
     output_path = project_dir / "story.md"
     output_path.write_text(md + "\n")

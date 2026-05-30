@@ -13,11 +13,13 @@ Usage:
 
     chronicle query projects
         Per-project counts: processed / pending / terminal-failed.
-    chronicle query sessions [PATH]
-        Show chronicle.md and session files for a project.
-    chronicle query timeline [--limit N]
+    chronicle query sessions [PATH | --project NAME]
+        Show chronicle.md and session files for a project (default: cwd).
+    chronicle query show NAME   (or: chronicle query NAME)
+        Show a project's chronicle by name (basename or slug substring).
+    chronicle query timeline [--limit N] [--project NAME]
         Recent sessions across all projects, newest first.
-    chronicle query search "term"
+    chronicle query search "term" [--project NAME]
         Full-text search across all chronicle markdown files.
 
     chronicle rewind [N] [--since N] [--diff N] [--summary N]
