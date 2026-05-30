@@ -50,8 +50,11 @@ def test_suggested_command_uses_slug_not_raw_path(
     query.sessions()
     captured = capsys.readouterr().out
 
-    # Must print the slug, NOT the raw path, as the --project value
-    assert f"--project {slug}" in captured
+    # Must print the project NAME, NOT the raw path, as the --project value.
+    # The suggestion now uses the de-dashed storage key (no leading dash), which
+    # still substring-matches batch's --project filter via project_name_matches.
+    from chronicle.config import storage_key
+    assert f"--project {storage_key(slug)}" in captured
     # Sanity: the raw slashed path should NOT appear in the suggested command line
     for line in captured.splitlines():
         if "chronicle process --project" in line:

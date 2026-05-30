@@ -87,8 +87,9 @@ class TestForegroundHappyPath:
                                 home=home, bin_dir=bin_dir, fake_mode="success")
         assert result.returncode == 0, result.stderr + result.stdout
 
-        # Session .md should exist under ~/.chronicle/projects/<slug>/sessions/
-        sessions_dir = home / ".chronicle" / "projects" / slug / "sessions"
+        # Session .md should exist under ~/.chronicle/projects/<key>/sessions/
+        from chronicle.config import storage_key
+        sessions_dir = home / ".chronicle" / "projects" / storage_key(slug) / "sessions"
         mds = list(sessions_dir.glob(f"*_{sid[:8]}*.md"))
         assert len(mds) == 1, f"expected 1 session md, got {mds}"
         content = mds[0].read_text()

@@ -138,8 +138,41 @@ def save_default_config():
 
 # ---------- Per-project helpers ----------
 
+def storage_key(slug: str) -> str:
+    """Chronicle's own per-project directory name under ~/.chronicle/projects/.
+
+    Claude Code's slug always begins with '-' (the leading '/' of an absolute
+    cwd). Chronicle does NOT need to mirror that dash in its OWN tree, so strip
+    exactly the one leading dash — Chronicle's folders become 'Users-ehz-foo'
+    instead of '-Users-ehz-foo'. Stripping a single dash is bijective with the
+    slug for every absolute-path project (`slug == source_dir_name(storage_key(slug))`),
+    so the immutable Claude Code source dir is always recoverable.
+    """
+    key = slug[1:] if slug.startswith("-") else slug
+    # Never yield an empty path segment: slug "-" (cwd "/") -> keep "-"; an empty
+    # slug -> an explicit sentinel. Both are pathological and never occur for a
+    # real /Users/... project.
+    return key or slug or "_unknown"
+
+
+def source_dir_name(key: str) -> str:
+    """Inverse of storage_key: the Claude Code source dir name (under
+    ~/.claude/projects/) for a Chronicle storage key. Unconditionally re-adds the
+    one leading dash storage_key removed — so key 'Users-x-foo' -> '-Users-x-foo'
+    and the double-dash key '-config' -> '--config'. (~/.claude/projects/ is
+    read-only to Chronicle; this only reconstructs a name to look it up, never to
+    rename it.) The filesystem-root project (cwd '/') is not supported."""
+    return "-" + key
+
+
 def project_chronicle_dir(slug: str) -> Path:
-    return projects_dir() / slug
+    """The ~/.chronicle/projects/ dir for a Claude source slug.
+
+    Accepts a dashed source slug and de-dashes it via storage_key. NB: a value
+    read back from a Chronicle dir name is already a KEY — pass such a value
+    through source_dir_name() first (or it would be de-dashed twice for the rare
+    double-dash key)."""
+    return projects_dir() / storage_key(slug)
 
 
 def ensure_dirs(slug: str):
@@ -155,7 +188,7 @@ def ensure_dirs(slug: str):
 
 def load_recent_titles(project_slug: str, max_entries: int = 10) -> list[str]:
     """Read recent session titles from a project's chronicle sessions dir."""
-    sdir = projects_dir() / project_slug / "sessions"
+    sdir = project_chronicle_dir(project_slug) / "sessions"
     if not sdir.exists():
         return []
     titles = []
@@ -244,10 +277,11 @@ def recover_project_path(project_dir: Path) -> str | None:
         m = re.search(r"^\*\*Project\*\*:[ \t]*(\S.*)$", text, re.MULTILINE)
         if m:
             path = m.group(1).strip()
-            # Only trust the path if it actually belongs to THIS slug — a copied
-            # or restored session record could carry another project's cwd, which
-            # would otherwise display the wrong basename.
-            if path and project_slug_for(path) == project_dir.name:
+            # Only trust the path if it actually belongs to THIS project — a
+            # copied/restored session record could carry another project's cwd,
+            # which would otherwise display the wrong basename. project_dir.name
+            # is the de-dashed storage key, so compare against storage_key(...).
+            if path and storage_key(project_slug_for(path)) == project_dir.name:
                 return path
     return None
 

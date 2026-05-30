@@ -55,7 +55,7 @@ def test_project_name_matches(query, slug, expected):
 def test_recover_project_path_rejects_foreign_path(tmp_path):
     # A copied/restored record under one slug carrying another project's cwd
     # must NOT be trusted (would display the wrong basename).
-    pdir = tmp_path / "-Users-me-api"
+    pdir = tmp_path / "Users-me-api"   # chronicle dir = de-dashed storage key
     sessions = pdir / "sessions"
     sessions.mkdir(parents=True)
     (sessions / "s.md").write_text("# S\n\n**Project**: /Users/me/client\n")
@@ -65,7 +65,7 @@ def test_recover_project_path_rejects_foreign_path(tmp_path):
 
 
 def test_recover_project_path_reads_newest_record(tmp_path):
-    pdir = tmp_path / "-Users-x-proj"
+    pdir = tmp_path / "Users-x-proj"   # de-dashed storage key
     sessions = pdir / "sessions"
     sessions.mkdir(parents=True)
     (sessions / "2026-01-01-old.md").write_text(
@@ -78,17 +78,17 @@ def test_recover_project_path_reads_newest_record(tmp_path):
 
 
 def test_recover_project_path_none_when_no_records(tmp_path):
-    pdir = tmp_path / "-Users-x-empty"
+    pdir = tmp_path / "Users-x-empty"
     (pdir / "sessions").mkdir(parents=True)
     assert recover_project_path(pdir) is None
     # no sessions dir at all
-    assert recover_project_path(tmp_path / "-Users-x-missing") is None
+    assert recover_project_path(tmp_path / "Users-x-missing") is None
 
 
 def test_recover_project_path_empty_value_does_not_grab_next_line(tmp_path):
     # A transcript with no cwd writes a bare "**Project**: " (trailing space).
     # The recovery regex must NOT consume the newline and capture "## Summary".
-    pdir = tmp_path / "-Users-x-nocwd"
+    pdir = tmp_path / "Users-x-nocwd"
     sessions = pdir / "sessions"
     sessions.mkdir(parents=True)
     (sessions / "s.md").write_text(
@@ -100,7 +100,7 @@ def test_recover_project_path_empty_value_does_not_grab_next_line(tmp_path):
 
 
 def test_recover_then_display_gives_basename(tmp_path):
-    pdir = tmp_path / "-Users-x-codex-council"
+    pdir = tmp_path / "Users-x-codex-council"
     sessions = pdir / "sessions"
     sessions.mkdir(parents=True)
     (sessions / "s.md").write_text("# S\n\n**Project**: /Users/x/codex-council\n")

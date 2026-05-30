@@ -170,7 +170,7 @@ class TestProcess:
         _seed_jsonl(home / ".claude" / "projects", "-tmp-proc", sid)
         r = _run(["process", "--workers", "2"], home=home, bin_dir=bin_dir)
         assert r.returncode == 0, r.stderr + r.stdout
-        sessions = home / ".chronicle" / "projects" / "-tmp-proc" / "sessions"
+        sessions = home / ".chronicle" / "projects" / "tmp-proc" / "sessions"
         assert list(sessions.glob(f"*_{sid[:8]}*.md"))
         assert (home / ".chronicle" / ".processed" / _hash(sid)).exists()
 
@@ -182,7 +182,7 @@ class TestProcess:
         assert r.returncode == 0
         assert "DRY RUN" in r.stdout
         assert not (home / ".chronicle" / ".processed" / _hash(sid)).exists()
-        assert not (home / ".chronicle" / "projects" / "-tmp-dry" / "chronicle.md").exists()
+        assert not (home / ".chronicle" / "projects" / "tmp-dry" / "chronicle.md").exists()
 
     def test_process_force_reprocesses(self, cli):
         home, bin_dir, _ = cli
@@ -349,7 +349,8 @@ class TestInsightStory:
         r = _run(["insight", slug.lstrip("-")], home=home, bin_dir=bin_dir, fake_mode="result",
                  extra_env={"FAKE_CLAUDE_RESULT": "<!DOCTYPE html><html><body>stub</body></html>"})
         assert r.returncode == 0, r.stderr + r.stdout
-        assert (home / ".chronicle" / "projects" / slug / "insight.html").exists()
+        from chronicle.config import storage_key
+        assert (home / ".chronicle" / "projects" / storage_key(slug) / "insight.html").exists()
 
     def test_story_writes_md(self, cli):
         home, bin_dir, _ = cli
@@ -357,7 +358,8 @@ class TestInsightStory:
         r = _run(["story", slug.lstrip("-")], home=home, bin_dir=bin_dir, fake_mode="result",
                  extra_env={"FAKE_CLAUDE_RESULT": "# Story\n\nstub narrative"})
         assert r.returncode == 0, r.stderr + r.stdout
-        assert (home / ".chronicle" / "projects" / slug / "story.md").exists()
+        from chronicle.config import storage_key
+        assert (home / ".chronicle" / "projects" / storage_key(slug) / "story.md").exists()
 
 
 # ---------------- install-hooks ----------------

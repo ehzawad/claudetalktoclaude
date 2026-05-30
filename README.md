@@ -201,9 +201,9 @@ chronicle --version
 
 **Session** — one conversation with Claude Code. Stored as `~/.claude/projects/<slug>/<session-id>.jsonl`.
 
-**Project slug** — Chronicle's internal storage key, identical to Claude Code's own project-directory name so `~/.chronicle/projects/<slug>/` lines up with `~/.claude/projects/<slug>/`. Claude Code builds it by replacing every non-alphanumeric character of the absolute working directory with `-` (runs not collapsed), so on disk the directory begins with a dash (from the leading `/`). You don't normally read it: every command **displays the clean folder name** (e.g. `my_api`) — or the dash-stripped slug in cross-project lists — and never a leading dash.
+**Project slug** — Claude Code's own project-directory name under `~/.claude/projects/`. It replaces every non-alphanumeric character of the absolute working directory with `-` (runs not collapsed), so it begins with a dash (from the leading `/`), e.g. `/Users/alice/my_api` → `~/.claude/projects/-Users-alice-my-api/`. Chronicle reads that tree but does **not** copy the dash into its own: it stores under the **de-dashed storage key**, `~/.chronicle/projects/Users-alice-my-api/` — Chronicle's folders never start with a dash. The two map one-to-one (the source slug is just `-` + the storage key).
 
-**Project matching** — `--project <name>` (and `chronicle query show <name>`) accepts whatever name a command shows you: the folder basename, the dash-stripped slug, or any substring of the underlying slug, with punctuation normalized — so `--project my_api` resolves correctly even though the slug stores it as `my-api`. List everything with `chronicle query projects`.
+**Project matching** — `--project <name>` (and `chronicle query show <name>`) accepts whatever name a command shows you: the folder basename (`my_api`), the de-dashed key (`Users-alice-my-api`), or any substring of either, with punctuation normalized — so `--project my_api` resolves even though the key stores `my-api`. Lists (`projects`, `timeline`) show the de-dashed key to disambiguate same-named folders; single-project views show the basename. List everything with `chronicle query projects`.
 
 **Marker state** — each session is in exactly one state: unprocessed (no marker), success (`.processed/<hash>`), or failed (`.failed/<hash>.json` with `terminal` flag + attempt counter). See [State and failures](#state-and-failures).
 
@@ -433,7 +433,7 @@ Each project gets up to three views:
 Default paths below use `~/.chronicle/`; set `CHRONICLE_HOME` to move Chronicle's state and runtime root.
 
 ```
-~/.claude/projects/<slug>/*.jsonl       # Claude Code session transcripts (source)
+~/.claude/projects/-<slug>/*.jsonl      # Claude Code session transcripts (source; dir starts with '-')
 
 ~/.chronicle/
   events.jsonl                          # hook event journal
@@ -445,7 +445,7 @@ Default paths below use `~/.chronicle/`; set `CHRONICLE_HOME` to move Chronicle'
   runtime/                              # unpacked PyInstaller binary (`chronicle update` swaps this atomically)
   .processed/<hash>                     # success marker
   .failed/<hash>.json                   # failure record (attempts, terminal, error)
-  projects/<slug>/
+  projects/<key>/                       # de-dashed storage key (NO leading dash; key == slug without the '-')
     chronicle.md                        # cumulative project log
     insight.html                        # `chronicle insight` output
     story.md                            # `chronicle story` output

@@ -19,8 +19,8 @@ from pathlib import Path
 
 
 from .config import (
-    projects_dir, project_slug_for, project_display_name,
-    project_name_matches, recover_project_path,
+    projects_dir, project_slug_for, project_chronicle_dir, project_display_name,
+    project_name_matches, recover_project_path, source_dir_name,
 )
 
 
@@ -39,7 +39,7 @@ def _find_project_dir(project: str | None = None) -> Path | None:
     # Default: current working directory
     cwd = os.getcwd()
     slug = project_slug_for(cwd)
-    candidate = projects_dir() / slug
+    candidate = project_chronicle_dir(slug)
     if candidate.exists():
         return candidate
 
@@ -353,7 +353,8 @@ def delete_session_by_number(sessions: list[dict], project_dir: Path, target_num
         return
 
     from .storage import delete_session
-    slug = project_dir.name
+    # project_dir.name is the de-dashed key; storage fns take a source slug.
+    slug = source_dir_name(project_dir.name)
     delete_session(target["path"], slug)
     print(f"  Deleted session #{target_num}: {target['title']}")
     print(f"  Removed: {target['path'].name}")
@@ -362,7 +363,7 @@ def delete_session_by_number(sessions: list[dict], project_dir: Path, target_num
 def prune_empty_sessions(sessions: list[dict], project_dir: Path):
     """Delete all sessions with 0 decisions (trivial/abandoned sessions)."""
     from .storage import delete_session
-    slug = project_dir.name
+    slug = source_dir_name(project_dir.name)  # de-dashed key -> source slug
 
     empty = [s for s in sessions if s["n_decisions"] == 0]
     if not empty:

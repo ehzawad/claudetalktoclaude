@@ -20,7 +20,7 @@ from pathlib import Path
 
 from .claude_cli import spawn_claude
 from .config import (
-    projects_dir, load_config, project_slug_for,
+    projects_dir, load_config, project_slug_for, project_chronicle_dir,
     project_display_name, project_name_matches, recover_project_path,
 )
 
@@ -34,7 +34,7 @@ def _find_project(name: str | None) -> Path | None:
         return matches[0] if matches else None
     cwd = os.getcwd()
     slug = project_slug_for(cwd)
-    project_dir = projects_dir() / slug
+    project_dir = project_chronicle_dir(slug)
     return project_dir if project_dir.exists() else None
 
 

@@ -21,8 +21,8 @@ import sys
 from pathlib import Path
 
 from .config import (
-    projects_dir, project_slug_for, project_display_name,
-    project_name_matches, recover_project_path,
+    projects_dir, project_slug_for, project_chronicle_dir, project_display_name,
+    project_name_matches, recover_project_path, storage_key, source_dir_name,
 )
 from .extractor import _session_id_from_jsonl
 
@@ -124,17 +124,18 @@ def sessions(project_path: str | None = None):
     """Show the chronicle for the current project (or a given path/name)."""
     cwd = project_path or os.environ.get("CHRONICLE_ORIGINAL_CWD", os.getcwd())
     cwd = cwd.rstrip("/")
-    slug = project_slug_for(cwd)
-    project_dir = projects_dir() / slug
+    # Type discipline: `source_slug` is always Claude Code's dashed name; the
+    # Chronicle dir name is the de-dashed key. Keep them distinct.
+    source_slug = project_slug_for(cwd)
+    project_dir = project_chronicle_dir(source_slug)
 
-    # If exact slug doesn't match, try substring match (e.g. "codex-opinion"
-    # matches "-home-synesis-codex-opinion")
+    # If exact match fails, substring-match against Chronicle dirs (de-dashed keys)
     if not project_dir.exists() and projects_dir().exists() and project_path:
         matches = [d for d in sorted(projects_dir().iterdir())
                     if d.is_dir() and project_name_matches(project_path, d.name)]
         if matches:
             project_dir = matches[0]
-            slug = project_dir.name
+            source_slug = source_dir_name(project_dir.name)  # key -> dashed source slug
             cwd = project_path
 
     chronicle_file = project_dir / "chronicle.md"
@@ -143,8 +144,7 @@ def sessions(project_path: str | None = None):
     if not project_dir.exists():
         # Check if sessions exist but haven't been processed yet
         claude_projects = Path.home() / ".claude" / "projects"
-        # Try exact slug first, then substring
-        claude_sessions = claude_projects / slug
+        claude_sessions = claude_projects / source_slug
         if not claude_sessions.exists() and claude_projects.exists() and project_path:
             matches = [d for d in sorted(claude_projects.iterdir())
                         if d.is_dir() and project_name_matches(project_path, d.name)]
@@ -170,7 +170,7 @@ def sessions(project_path: str | None = None):
                 # against the slugged directory name under ~/.claude/projects/,
                 # not against raw filesystem paths. Print the resolved slug so
                 # the suggested command actually works when copy-pasted.
-                process_filter = claude_sessions.name
+                process_filter = storage_key(claude_sessions.name)
                 print("\nTo process now:")
                 print(f"  chronicle process --project {shlex.quote(process_filter)} --workers 5")
                 return
@@ -267,18 +267,20 @@ def list_projects():
     from .storage import is_succeeded, is_terminal_failure
     claude_projects = Path.home() / ".claude" / "projects"
 
-    # Gather slugs from both sides
-    slugs: set[str] = set()
+    # Gather one storage KEY per project from both trees. Chronicle dirs are
+    # already de-dashed keys; Claude source dirs are dashed slugs — normalize
+    # those through storage_key so the same project isn't counted twice.
+    keys: set[str] = set()
     if projects_dir().exists():
         for d in projects_dir().iterdir():
             if d.is_dir():
-                slugs.add(d.name)
+                keys.add(d.name)
     if claude_projects.exists():
         for d in claude_projects.iterdir():
             if d.is_dir():
-                slugs.add(d.name)
+                keys.add(storage_key(d.name))
 
-    if not slugs:
+    if not keys:
         print("No chronicles and no sessions found.")
         print("Start a coding session first, then run: chronicle process --workers 5")
         return
@@ -286,12 +288,13 @@ def list_projects():
     totals = {"processed": 0, "pending": 0, "failed": 0}
     rows: list[tuple[str, int, int, int]] = []
 
-    for slug in sorted(slugs):
+    for slug in sorted(keys):
         processed = 0
         pending = 0
         failed = 0
 
-        cp_slug = claude_projects / slug
+        # Counts always come from the Claude source tree (dashed dir name).
+        cp_slug = claude_projects / source_dir_name(slug)
         if cp_slug.exists():
             for jsonl in cp_slug.glob("*.jsonl"):
                 if "subagents" in str(jsonl):
@@ -313,13 +316,14 @@ def list_projects():
 
     print(f"  {'Project':50}  {'OK':>4}  {'Pend':>4}  {'Fail':>4}")
     print(f"  {'─' * 50}  {'─' * 4}  {'─' * 4}  {'─' * 4}")
-    for slug, p, pe, f in rows:
+    for key, p, pe, f in rows:
         if p + pe + f == 0:
             continue
-        # Cross-project list: de-dashed slug disambiguates better than a bare
-        # basename (two projects can share a folder name).
-        disp = project_display_name(slug)
-        short = disp if len(disp) <= 50 else disp[:47] + "..."
+        # Cross-project list: show the storage KEY (the de-dashed slug) directly
+        # — it already has no leading dash and disambiguates same-named folders.
+        # Do NOT re-run project_display_name on it (that would strip a second dash
+        # from a rare double-dash key).
+        short = key if len(key) <= 50 else key[:47] + "..."
         print(f"  {short:50}  {p:>4}  {pe:>4}  {f:>4}")
     print(f"  {'─' * 50}  {'─' * 4}  {'─' * 4}  {'─' * 4}")
     print(f"  {'Total':50}  {totals['processed']:>4}  "

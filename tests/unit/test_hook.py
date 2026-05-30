@@ -157,7 +157,9 @@ class TestDaemonSpawnGating:
 
 class TestAdditionalContextInjection:
     def _seed_session_md(self, chronicle_dir: Path, slug: str, title: str):
-        sd = chronicle_dir / "projects" / slug / "sessions"
+        # Chronicle stores under the de-dashed storage key, not the raw slug.
+        from chronicle.config import storage_key
+        sd = chronicle_dir / "projects" / storage_key(slug) / "sessions"
         sd.mkdir(parents=True, exist_ok=True)
         (sd / f"2026-04-17_0000_abc_{slug}.md").write_text(f"# {title}\n")
 
