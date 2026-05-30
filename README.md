@@ -12,11 +12,12 @@ Records the *reasoning* behind your coding sessions — planning discussions, tr
 
 Chronicle ships as a prebuilt self-contained binary. No Python, venv, or system package dependencies on the target machine.
 
+##### Default (foreground — zero passive token burn)
 ```bash
-# Default (foreground — zero passive token burn)
 curl -fsSL https://raw.githubusercontent.com/ehzawad/claudetalktoclaude/main/install.sh | bash
-
-# Background mode (daemon auto-summarizes after 5 min quiet)
+```
+##### Background mode (daemon auto-summarizes after 5 min quiet)
+```bash
 curl -fsSL https://raw.githubusercontent.com/ehzawad/claudetalktoclaude/main/install.sh | bash && chronicle install-daemon
 ```
 
