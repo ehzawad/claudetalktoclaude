@@ -201,9 +201,9 @@ chronicle --version
 
 **Session** — one conversation with Claude Code. Stored as `~/.claude/projects/<slug>/<session-id>.jsonl`.
 
-**Project slug** — Claude Code's project directory name. Chronicle prefers the transcript file's parent directory when available; otherwise it replaces every non-alphanumeric character in the working directory with `-` without collapsing runs. For example `/Users/alice/.config/my_api` → `-Users-alice--config-my-api`.
+**Project slug** — Claude Code's project directory name (the storage key under `~/.chronicle/projects/`). Chronicle prefers the transcript file's parent directory when available; otherwise it replaces every non-alphanumeric character in the working directory with `-` without collapsing runs. For example `/Users/alice/.config/my_api` → `-Users-alice--config-my-api`. Commands *display* the folder basename (`my_api`) or, in cross-project lists, the de-dashed slug (`Users-alice--config-my-api`) — never the raw leading dash.
 
-**Substring project matching** — `--project <name>` matches any slug containing `<name>`. So `--project my-api` finds `-Users-alice-my-api`. See all your slugs: `chronicle query projects`.
+**Project matching** — `--project <name>` (and `chronicle query show <name>`) matches a slug that contains `<name>` **or** whose displayed basename you typed — so the punctuation-normalized form matches too: `--project my_api` finds `-Users-alice--config-my-api` even though the slug stores `my-api`. See all your slugs: `chronicle query projects`.
 
 **Marker state** — each session is in exactly one state: unprocessed (no marker), success (`.processed/<hash>`), or failed (`.failed/<hash>.json` with `terminal` flag + attempt counter). See [State and failures](#state-and-failures).
 
