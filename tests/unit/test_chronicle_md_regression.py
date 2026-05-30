@@ -76,6 +76,50 @@ def test_reprocess_preserves_other_sessions_and_no_orphans(isolated_chronicle):
     assert "NARRATIVE_1" in content and "NARRATIVE_3" in content
 
 
+def test_rebuild_prompts_ignores_fenced_prompt_details_lookalike(isolated_chronicle):
+    # A Chronicle self-audit can cat a session file, putting a literal copy of
+    # the prompt <details> wrapper inside the fenced turn log before the real
+    # prompt block. The EOF prompts rebuild must use the real block.
+    from chronicle import storage
+    from chronicle.config import project_chronicle_dir
+    from chronicle.extractor import UserPrompt
+    from chronicle.summarizer import ChronicleEntry
+
+    slug = "-tmp-proj-prompts"
+    sid = "sess-prompt-aaaaaaaa"
+    fake_cat = (
+        "### Turn index\n\n"
+        "### Full chronological log\n\n"
+        "<details><summary>Full chronological log</summary>\n\n"
+        "`````\n"
+        "<details><summary>User prompts (verbatim)</summary>\n\n"
+        "**Prompt 99** (1999-01-01 00:00:00):\n"
+        "> FAKE FROM FENCED CAT\n\n"
+        "</details>\n"
+        "`````\n\n"
+        "</details>"
+    )
+    entry = ChronicleEntry(
+        session_id=sid, project_path="/tmp/p", project_slug=slug,
+        start_time="2026-05-29T10:00:00Z", end_time="2026-05-29T10:30:00Z",
+        git_branch="main",
+        user_prompts=[UserPrompt(
+            text="REAL USER PROMPT",
+            timestamp="2026-05-29T10:00:00Z",
+            uuid="u",
+        )],
+        title="Prompt extractor", summary="S.", narrative="NARRATIVE_PROMPTS",
+        turn_log=fake_cat, total_turns=1,
+    )
+    storage.write_chronicle(entry, _digest(sid, slug), max_retries=3)
+
+    content = (project_chronicle_dir(slug) / "chronicle.md").read_text()
+    eof_prompts = content.split("<!-- prompts -->", 1)[1]
+    assert "REAL USER PROMPT" in eof_prompts
+    assert "FAKE FROM FENCED CAT" not in eof_prompts
+    assert "NARRATIVE_PROMPTS" in content
+
+
 def test_corrupt_chronicle_missing_separator_self_heals(isolated_chronicle):
     # BUG-09: a chronicle.md with the end marker but a missing timeline
     # separator must NOT raise (which escapes write_chronicle with no marker ->

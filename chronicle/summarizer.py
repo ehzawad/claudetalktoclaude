@@ -417,7 +417,10 @@ def entry_to_session_markdown(entry: ChronicleEntry) -> str:
     short_id = entry.session_id[:8]
     ts = entry.start_time[:19].replace("T", " ") if entry.start_time else "unknown"
 
-    lines.append(f"# {entry.title or f'Session {short_id}'}")
+    # Collapse newlines so a multi-line title can't inject extra headings into the
+    # single-line H1 (and stays a single rebuild_prompts_section H1 match).
+    title_line = (entry.title or f"Session {short_id}").replace("\n", " ")
+    lines.append(f"# {title_line}")
     lines.append("")
     lines.append(f"**Session**: {short_id} | **Date**: {ts} | "
                  f"**Branch**: {entry.git_branch} | **Turns**: {entry.total_turns}")

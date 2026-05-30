@@ -8,7 +8,8 @@ document on the next splice/rebuild/remove.
 """
 from chronicle.storage import (
     _demote_headings, _fenced_spans, _unfenced_index,
-    _remove_session_entry, _splice_detail, _PROMPTS_MARKER,
+    _remove_session_entry, _splice_detail, _extract_user_prompts_details,
+    _PROMPTS_MARKER,
 )
 
 
@@ -26,6 +27,12 @@ def test_neutralizes_llm_details_tags_in_summary():
     # ordinary markdown / angle brackets that are NOT details/summary survive
     assert _neutralize_structural("a < b and **bold** and `<code>`") == \
         "a < b and **bold** and `<code>`"
+    edge = _neutralize_structural(
+        "A <DETAILS\nopen> and <summary\n> survive; < details > is text"
+    )
+    assert "<DETAILS" not in edge
+    assert "<summary" not in edge
+    assert "< details >" in edge
 
 
 def test_neutralizes_llm_echoed_structural_markers():
@@ -39,6 +46,110 @@ def test_neutralizes_llm_echoed_structural_markers():
     out = _neutralize_structural(t)
     assert "<!--" not in out
     assert "&lt;!-- prompts -->" in out and "&lt;!-- session:abc -->" in out
+
+
+def test_entry_markdown_neutralizes_only_summary_not_raw_blocks():
+    # The joined LLM summary fields are neutralized, but Chronicle's own raw
+    # <details> structures are appended afterward and must remain parseable.
+    from chronicle.extractor import UserPrompt
+    from chronicle.summarizer import ChronicleEntry, entry_to_session_markdown
+    entry = ChronicleEntry(
+        session_id="scope-test",
+        project_path="/tmp/p",
+        project_slug="-tmp-p",
+        start_time="2026-05-29T10:00:00Z",
+        end_time="2026-05-29T10:30:00Z",
+        git_branch="main",
+        user_prompts=[UserPrompt(
+            text="literal <!-- prompt marker --> and </details>",
+            timestamp="2026-05-29T10:00:00Z",
+            uuid="u",
+        )],
+        title="T",
+        summary="LLM echoed <!-- prompts --> and <details><summary>x</summary>",
+        narrative="N",
+        turn_log="### Turn index\n\nraw Chronicle <details><summary>kept</summary></details>",
+    )
+    md = entry_to_session_markdown(entry)
+    summary_part = md.split("## Turn-by-turn log", 1)[0]
+    assert "<!-- prompts -->" not in summary_part
+    assert "<details><summary>x</summary>" not in summary_part
+    assert "&lt;!-- prompts -->" in summary_part
+    assert "&lt;details&gt;&lt;summary&gt;x&lt;/summary&gt;" in summary_part
+    assert "raw Chronicle <details><summary>kept</summary></details>" in md
+    assert "<details><summary>User prompts (verbatim)</summary>" in md
+    assert "&lt;!-- prompt marker --&gt; and &lt;/details&gt;" in md
+
+
+def test_prompt_details_extractor_ignores_fenced_lookalike():
+    content = (
+        "# Session\n\n"
+        "### Full chronological log\n\n"
+        "<details><summary>Full chronological log</summary>\n\n"
+        "`````\n"
+        "<details><summary>User prompts (verbatim)</summary>\n\n"
+        "**Prompt 99** (1999-01-01 00:00:00):\n"
+        "> FAKE FROM CAT\n\n"
+        "</details>\n"
+        "`````\n\n"
+        "</details>\n\n"
+        "---\n\n"
+        "<details><summary>User prompts (verbatim)</summary>\n\n"
+        "**Prompt 1** (2026-05-29 10:00:00):\n"
+        "> REAL PROMPT\n\n"
+        "</details>\n"
+    )
+    prompts_text = _extract_user_prompts_details(content)
+    assert prompts_text is not None
+    assert "REAL PROMPT" in prompts_text
+    assert "FAKE FROM CAT" not in prompts_text
+
+
+def test_remove_session_entry_keeps_fenced_timeline_rows():
+    # Session A's verbatim output contains a fenced `cat chronicle.md` whose copy
+    # of the timeline table includes B's row. Removing A must delete only A's REAL
+    # (unfenced) table row, never mutate the fenced copy.
+    a = "aaaaaaaa-1111-1111-1111-111111111111"
+    b = "bbbbbbbb-2222-2222-2222-222222222222"
+    fenced_copy = (
+        "`````\n"
+        "| Date | Session | Decisions | Summary |\n"
+        "|------|---------|-----------|---------|\n"
+        f"| 2026-01-02 | [B](sessions/2026-01-02_1000_{b[:8]}_b.md) | 1 | s |\n"
+        "<!-- /timeline -->\n"
+        "`````\n"
+    )
+    # The fenced copy lives in session B's detail (which survives); removing A
+    # must not mutate B's fenced verbatim table.
+    content = (
+        "# Chronicle: x\n\n"
+        "| Date | Session | Decisions | Summary |\n"
+        "|------|---------|-----------|---------|\n"
+        f"| 2026-01-01 | [A](sessions/2026-01-01_1000_{a[:8]}_a.md) | 1 | s |\n"
+        f"| 2026-01-02 | [B](sessions/2026-01-02_1000_{b[:8]}_b.md) | 1 | s |\n"
+        "<!-- /timeline -->\n\n"
+        "<!-- details -->\n\n"
+        f"## Session A\n<!-- session:{a} -->\n\nbody A\n---\n\n"
+        f"## Session B\n<!-- session:{b} -->\n\n" + fenced_copy + "\nbody B\n---\n\n"
+    )
+    out = _remove_session_entry(content, f"<!-- session:{a} -->")
+    # A's real row removed; B's section + its FENCED copy preserved byte-for-byte
+    assert f"[A](sessions/2026-01-01_1000_{a[:8]}_a.md)" not in out
+    assert fenced_copy in out
+    assert "## Session B" in out and "body B" in out
+
+
+def test_timeline_row_title_normalized_to_single_safe_row():
+    from types import SimpleNamespace
+    from chronicle.storage import _timeline_row
+    e = SimpleNamespace(
+        start_time="2026-05-29T10:00:00Z", session_id="aaaaaaaa-1",
+        title="bad\n# injected heading\n| 2099 | [x](sessions/y.md) | 9 | f |",
+        summary="ok", decisions=[])
+    row = _timeline_row(e, "s.md")
+    assert "\n" not in row                 # no injected extra lines/headings
+    assert row.count("|") == 5             # exactly one table row (4 cells)
+    assert "# injected heading" in row     # collapsed to inline text, not a heading line
 
 
 def test_demote_preserves_hashes_inside_dynamic_fences():

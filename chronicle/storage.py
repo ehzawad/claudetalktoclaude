@@ -204,21 +204,18 @@ def delete_session(session_path, slug: str):
     sid_match = re.search(r"\*\*Session\*\*:\s*(\w+)", content)
     short_id = sid_match.group(1) if sid_match else session_path.stem[:8]
 
-    # Try to find the full UUID from chronicle.md's <!-- session:UUID --> marker
-    full_id = short_id
+    # Find the real (UNFENCED) '<!-- session:UUID -->' marker — a fenced
+    # `cat chronicle.md` lookalike must not be picked, or _remove_session_entry
+    # would no-op and leave a stale entry after the session file is deleted.
     if chronicle_file.exists():
         chronicle = chronicle_file.read_text()
-        # The marker has the full UUID: <!-- session:xxxxxxxx-xxxx-... -->
-        full_match = re.search(rf"<!-- session:({re.escape(short_id)}[a-f0-9-]*)", chronicle)
-        if full_match:
-            full_id = full_match.group(1)
-
-        session_marker = f"<!-- session:{full_id}"
-        for line in chronicle.split("\n"):
-            if session_marker in line:
-                session_marker = line.strip()
+        spans = _fenced_spans(chronicle)
+        session_marker = None
+        for m in re.finditer(rf"<!-- session:{re.escape(short_id)}[a-f0-9-]* -->", chronicle):
+            if not any(s <= m.start() < e for s, e in spans):
+                session_marker = m.group(0)
                 break
-        if session_marker in chronicle:
+        if session_marker:
             chronicle = _remove_session_entry(chronicle, session_marker)
             _atomic_write(chronicle_file, chronicle)
 
@@ -285,19 +282,31 @@ def _remove_session_entry(content: str, session_marker: str) -> str:
 
     content = content[:heading_start] + content[section_end:]
 
-    # Remove the stale timeline table row — ONLY within the timeline table block,
-    # so a fenced verbatim line that merely looks like a row is never deleted.
+    # Remove the stale timeline table row — ONLY within the REAL (unfenced)
+    # timeline table block, so a fenced `cat chronicle.md` whose verbatim output
+    # contains the table header/rows is never mutated.
     sid = session_marker.split(":")[1].split(" ")[0]
     short_id = sid[:8]
     out = []
     in_table = False
+    fence = None
     for l in content.split("\n"):
-        if l == _TIMELINE_HEADER:
-            in_table = True
-        elif l == _TIMELINE_END:
-            in_table = False
-        if in_table and l.startswith("|") and short_id in l and "](sessions/" in l:
+        m = _FENCE_RE.match(l)
+        if m:
+            tok = m.group(1)
+            if fence is None:
+                fence = tok
+            elif tok[0] == fence[0] and len(tok) >= len(fence) and l.strip() == tok:
+                fence = None
+            out.append(l)
             continue
+        if fence is None:
+            if l == _TIMELINE_HEADER:
+                in_table = True
+            elif l == _TIMELINE_END:
+                in_table = False
+            if in_table and l.startswith("|") and short_id in l and "](sessions/" in l:
+                continue
         out.append(l)
     return "\n".join(out)
 
@@ -388,6 +397,33 @@ def _unfenced_index(text: str, marker: str, start: int = 0, *,
 
 
 _PROMPTS_MARKER = "<!-- prompts -->"
+_USER_PROMPTS_DETAILS_OPEN = "<details><summary>User prompts (verbatim)</summary>"
+_USER_PROMPTS_DETAILS_CLOSE = "</details>"
+
+
+def _extract_user_prompts_details(content: str) -> str | None:
+    """Return the body of Chronicle's real per-session prompts block.
+
+    Session markdown stores the archival turn log before the final user-prompts
+    block. That turn log can contain fenced verbatim output from commands like
+    `cat sessions/foo.md`, including a literal copy of the same
+    <details><summary>User prompts (verbatim)</summary> wrapper. Pick the LAST
+    matching wrapper outside fences so fenced copies cannot replace/drop the real
+    prompts during the EOF prompts-section rebuild.
+    """
+    spans = _fenced_spans(content)
+    start = _unfenced_index(
+        content, _USER_PROMPTS_DETAILS_OPEN, last=True, spans=spans,
+    )
+    if start == -1:
+        return None
+    body_start = start + len(_USER_PROMPTS_DETAILS_OPEN)
+    end = _unfenced_index(
+        content, _USER_PROMPTS_DETAILS_CLOSE, body_start, spans=spans,
+    )
+    if end == -1:
+        return None
+    return content[body_start:end]
 
 
 def rebuild_prompts_section(slug: str):
@@ -408,15 +444,11 @@ def rebuild_prompts_section(slug: str):
         title_match = re.match(r"^# (.+)", content)
         session_title = title_match.group(1) if title_match else md_file.stem
 
-        # Extract prompts from the <details> section
-        details_match = re.search(
-            r"<details><summary>User prompts \(verbatim\)</summary>\s*\n(.*?)</details>",
-            content, re.DOTALL
-        )
-        if not details_match:
+        # Extract prompts from Chronicle's final <details> section, ignoring
+        # fenced lookalikes in the archival turn log.
+        prompts_text = _extract_user_prompts_details(content)
+        if prompts_text is None:
             continue
-
-        prompts_text = details_match.group(1)
         # Parse individual prompts: **Prompt N** (timestamp):
         for m in re.finditer(
             r"\*\*Prompt (\d+)\*\* \(([^)]*)\):\s*\n((?:>(?: .*)?\n?)+)",
@@ -455,7 +487,11 @@ def rebuild_prompts_section(slug: str):
     for ts, session_title, num, text in all_prompts:
         if session_title != current_session:
             current_session = session_title
-            lines.append(f"### {session_title}")
+            # Neutralize markers the title may carry (e.g. a legacy/hand-edited
+            # session H1 like '# Fix <!-- prompts --> X') so the EOF block can't
+            # reintroduce a raw structural marker that the next rebuild mistargets.
+            safe_title = session_title.replace("<!--", "&lt;!--").replace("\n", " ")
+            lines.append(f"### {safe_title}")
             lines.append("")
         lines.append(f"**Prompt {num}** ({ts}):")
         for pline in text.split("\n"):
@@ -490,7 +526,8 @@ _DETAIL_START = "<!-- details -->"
 def _timeline_row(entry, sf: str) -> str:
     """Build one markdown table row for the timeline."""
     ts = entry.start_time[:16].replace("T", " ") if entry.start_time else "unknown"
-    title = entry.title or f"Session {entry.session_id[:8]}"
+    # Collapse newlines and pipes so a title can't span lines or split the row.
+    title = (entry.title or f"Session {entry.session_id[:8]}").replace("\n", " ").replace("|", "/")
     # Truncate title for table readability
     if len(title) > 60:
         title = title[:57] + "..."
@@ -580,23 +617,27 @@ def append_to_chronicle(entry, slug: str):
         if session_marker in existing:
             existing = _remove_session_entry(existing, session_marker)
 
-        if _TIMELINE_END in existing:
+        # Locate the REAL timeline markers OUTSIDE fences, so a fenced
+        # `cat chronicle.md` whose output contains '<!-- /timeline -->' can't be
+        # mistaken for the table (which would splice the row into the fence).
+        timeline_end_idx = _unfenced_index(existing, _TIMELINE_END)
+        if timeline_end_idx != -1:
             # Insert the row into the timeline, repairing the table in place if
             # it is corrupt (BUG-09): a present end marker does NOT guarantee the
             # separator/header survived a hand-edit, and a bare index() would
             # raise ValueError -> escape write_chronicle with no marker written
             # (infinite re-summarization in bg / batch abort in fg).
-            sep_idx = existing.find(_TIMELINE_SEP)
+            sep_idx = _unfenced_index(existing, _TIMELINE_SEP)
             if sep_idx != -1:
                 after_sep = existing.index("\n", sep_idx) + 1
                 existing = existing[:after_sep] + table_row + "\n" + existing[after_sep:]
             else:
-                hdr_idx = existing.find(_TIMELINE_HEADER)
+                hdr_idx = _unfenced_index(existing, _TIMELINE_HEADER)
                 if hdr_idx != -1:
                     after_hdr = existing.index("\n", hdr_idx) + 1
                     existing = existing[:after_hdr] + _TIMELINE_SEP + "\n" + table_row + "\n" + existing[after_hdr:]
                 else:
-                    end_idx = existing.index(_TIMELINE_END)
+                    end_idx = timeline_end_idx
                     block = _TIMELINE_HEADER + "\n" + _TIMELINE_SEP + "\n" + table_row + "\n"
                     existing = existing[:end_idx] + block + existing[end_idx:]
             # Splice the detail BEFORE the EOF prompts block so a later
