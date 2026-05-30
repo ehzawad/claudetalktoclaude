@@ -16,16 +16,29 @@ def test_neutralizes_llm_details_tags_in_summary():
     # When the LLM summarizes a session ABOUT collapsible markdown, its summary
     # text contains literal <details>/<summary> tags that would otherwise open a
     # fold swallowing the rest of the document (or close a structural block early).
-    from chronicle.summarizer import _neutralize_details_tags
+    from chronicle.summarizer import _neutralize_structural
     t = ("Layout = a collapsed <details> per session; rejected per-turn "
          "<details open> and the </details> alternative; <summary>x</summary>")
-    out = _neutralize_details_tags(t)
+    out = _neutralize_structural(t)
     for tag in ("<details>", "<details open>", "</details>", "<summary>", "</summary>"):
         assert tag not in out
     assert "&lt;details&gt;" in out and "&lt;/details&gt;" in out
     # ordinary markdown / angle brackets that are NOT details/summary survive
-    assert _neutralize_details_tags("a < b and **bold** and `<code>`") == \
+    assert _neutralize_structural("a < b and **bold** and `<code>`") == \
         "a < b and **bold** and `<code>`"
+
+
+def test_neutralizes_llm_echoed_structural_markers():
+    # The real truncation bug: summarizing a session ABOUT Chronicle makes the
+    # LLM write '<!-- prompts -->' / '<!-- session: -->' into its UNFENCED summary
+    # prose. Left raw, rebuild_prompts_section matches the echoed marker and
+    # truncates chronicle.md. Neutralize the '<!--' so it's literal text.
+    from chronicle.summarizer import _neutralize_structural
+    t = ("Fixed rebuild_prompts_section to locate the <!-- prompts --> marker "
+         "and bounded the <!-- session:abc --> scan; also <!-- /timeline -->.")
+    out = _neutralize_structural(t)
+    assert "<!--" not in out
+    assert "&lt;!-- prompts -->" in out and "&lt;!-- session:abc -->" in out
 
 
 def test_demote_preserves_hashes_inside_dynamic_fences():

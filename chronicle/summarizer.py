@@ -386,17 +386,29 @@ async def async_summarize_session(digest: SessionDigest) -> ChronicleEntry:
     return _populate_entry_from_structured(data, entry)
 
 
-def _neutralize_details_tags(text: str) -> str:
-    """Escape any <details>/<summary> tags the LLM emitted inside its summary
-    text (it routinely happens when summarizing a session about collapsible
-    Markdown). Left raw, an LLM '<details>' opens a fold that swallows the rest
-    of the rendered document, and a '</details>' closes a structural block early.
-    Other Markdown (bold, lists, inline code) is preserved untouched."""
-    return re.sub(
+def _neutralize_structural(text: str) -> str:
+    """Make LLM-generated summary text safe to embed in chronicle.md.
+
+    When summarizing a session about Chronicle itself, the model routinely writes
+    Chronicle's OWN structure into its prose: '<details>'/'<summary>' tags and the
+    HTML-comment markers ('<!-- session: -->', '<!-- prompts -->', '<!-- details -->',
+    '<!-- /timeline -->'). Left raw and UNFENCED (summary text is not fenced),
+    these are indistinguishable from the real structural markers — a stray
+    '<details>' opens a fold swallowing the document, and an echoed '<!-- prompts -->'
+    makes rebuild_prompts_section truncate chronicle.md at that point. Neutralize
+    them by escaping the '<' so they render as literal text instead of structure.
+    Ordinary Markdown (bold, lists, inline code, plain '<') is preserved.
+    """
+    text = re.sub(
         r"</?(?:details|summary)\b[^>]*>",
         lambda m: m.group(0).replace("<", "&lt;").replace(">", "&gt;"),
         text, flags=re.IGNORECASE,
     )
+    # Neutralize Chronicle's HTML-comment structural markers (any '<!--' the model
+    # echoed). The real markers are injected by storage, never here, so this only
+    # touches LLM prose.
+    text = text.replace("<!--", "&lt;!--")
+    return text
 
 
 def entry_to_session_markdown(entry: ChronicleEntry) -> str:
@@ -650,7 +662,7 @@ def entry_to_session_markdown(entry: ChronicleEntry) -> str:
     # Markdown). Neutralize those so they can't open/close the structural
     # collapsible blocks Chronicle adds next. The turn log and prompts blocks
     # below are already render-safe and must NOT be neutralized.
-    body = [_neutralize_details_tags("\n".join(lines))]
+    body = [_neutralize_structural("\n".join(lines))]
 
     # Turn-by-turn chronological log. The log renders full tool inputs/outputs
     # inside their own collapsible fenced blocks; do not wrap the whole section
