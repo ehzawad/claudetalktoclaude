@@ -201,9 +201,9 @@ chronicle --version
 
 **Session** — one conversation with Claude Code. Stored as `~/.claude/projects/<slug>/<session-id>.jsonl`.
 
-**Project slug** — Claude Code's project directory name (the storage key under `~/.chronicle/projects/`). Chronicle prefers the transcript file's parent directory when available; otherwise it replaces every non-alphanumeric character in the working directory with `-` without collapsing runs. For example `/Users/alice/.config/my_api` → `-Users-alice--config-my-api`. Commands *display* the folder basename (`my_api`) or, in cross-project lists, the de-dashed slug (`Users-alice--config-my-api`) — never the raw leading dash.
+**Project slug** — Chronicle's internal storage key, identical to Claude Code's own project-directory name so `~/.chronicle/projects/<slug>/` lines up with `~/.claude/projects/<slug>/`. Claude Code builds it by replacing every non-alphanumeric character of the absolute working directory with `-` (runs not collapsed), so on disk the directory begins with a dash (from the leading `/`). You don't normally read it: every command **displays the clean folder name** (e.g. `my_api`) — or the dash-stripped slug in cross-project lists — and never a leading dash.
 
-**Project matching** — `--project <name>` (and `chronicle query show <name>`) matches a slug that contains `<name>` **or** whose displayed basename you typed — so the punctuation-normalized form matches too: `--project my_api` finds `-Users-alice--config-my-api` even though the slug stores `my-api`. See all your slugs: `chronicle query projects`.
+**Project matching** — `--project <name>` (and `chronicle query show <name>`) accepts whatever name a command shows you: the folder basename, the dash-stripped slug, or any substring of the underlying slug, with punctuation normalized — so `--project my_api` resolves correctly even though the slug stores it as `my-api`. List everything with `chronicle query projects`.
 
 **Marker state** — each session is in exactly one state: unprocessed (no marker), success (`.processed/<hash>`), or failed (`.failed/<hash>.json` with `terminal` flag + attempt counter). See [State and failures](#state-and-failures).
 
