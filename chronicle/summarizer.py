@@ -12,6 +12,7 @@ Provides `async_summarize_session()` for parallel processing.
 """
 
 import asyncio
+import html
 import json
 import sys
 from dataclasses import dataclass, field
@@ -648,8 +649,11 @@ def entry_to_session_markdown(entry: ChronicleEntry) -> str:
         for i, prompt in enumerate(entry.user_prompts, 1):
             pts = prompt.timestamp[:19].replace("T", " ") if prompt.timestamp else ""
             lines.append(f"**Prompt {i}** ({pts}):")
+            # HTML-escape so a prompt containing '</details>' or other raw HTML
+            # can't early-close this collapsible block (the true unescaped prompt
+            # is also preserved, fenced, in the Full chronological log above).
             for pline in prompt.text.split("\n"):
-                lines.append(f"> {pline}")
+                lines.append(f"> {html.escape(pline, quote=False)}")
             lines.append("")
         lines.append("</details>")
         lines.append("")

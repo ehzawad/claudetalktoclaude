@@ -249,7 +249,10 @@ def write_session_record(entry, slug: str):
 
 def _remove_session_entry(content: str, session_marker: str) -> str:
     """Remove an existing session's timeline row + detail section from chronicle.md."""
-    marker_idx = content.index(session_marker)
+    spans = _fenced_spans(content)
+    marker_idx = _unfenced_index(content, session_marker, spans=spans)
+    if marker_idx == -1:
+        return content  # marker only appears inside fenced verbatim output; nothing to remove
 
     # The marker is always injected on its own line immediately after the
     # (demoted) heading line, so derive the heading from the line directly
@@ -269,7 +272,7 @@ def _remove_session_entry(content: str, session_marker: str) -> str:
     # next session marker. Using rfind instead of find avoids stopping at
     # the internal --- before <details> and orphaning the prompts block.
     after_marker = marker_idx + len(session_marker)
-    next_session = content.find("<!-- session:", after_marker)
+    next_session = _unfenced_index(content, "<!-- session:", after_marker, spans=spans)
     search_bound = next_session if next_session >= 0 else len(content)
 
     separator = "\n---\n"
@@ -281,29 +284,106 @@ def _remove_session_entry(content: str, session_marker: str) -> str:
 
     content = content[:heading_start] + content[section_end:]
 
-    # Remove stale timeline table row
+    # Remove the stale timeline table row — ONLY within the timeline table block,
+    # so a fenced verbatim line that merely looks like a row is never deleted.
     sid = session_marker.split(":")[1].split(" ")[0]
     short_id = sid[:8]
-    lines = content.split("\n")
-    cleaned = [l for l in lines if not (l.startswith("|") and short_id in l and "](sessions/" in l)]
-    return "\n".join(cleaned)
+    out = []
+    in_table = False
+    for l in content.split("\n"):
+        if l == _TIMELINE_HEADER:
+            in_table = True
+        elif l == _TIMELINE_END:
+            in_table = False
+        if in_table and l.startswith("|") and short_id in l and "](sessions/" in l:
+            continue
+        out.append(l)
+    return "\n".join(out)
+
+
+_FENCE_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})")
+_ATX_HEADING_RE = re.compile(r"^#{1,6}(?:\s|$)")
 
 
 def _demote_headings(md: str) -> str:
-    """Demote markdown headings by one level (# → ##, ## → ###, etc.).
+    """Demote real ATX markdown headings by one level (# → ##, ## → ###, …).
 
-    Only demotes headings that are NOT inside fenced code blocks.
+    Fence-aware: tracks the EXACT opening fence (char + length) and only closes
+    on a matching fence of length >= the opener, on its own line. This matters
+    because Chronicle's verbatim blocks use dynamic fences (4+ backticks) and may
+    contain shorter inner ``` runs — a naive "toggle on any ```" desyncs and
+    mangles '#'-content inside the fenced payload. Only demotes lines that are
+    genuine ATX headings (1-6 '#' then space/EOL), never '#hashtag' or a '#' that
+    is part of fenced content.
     """
     lines = md.split("\n")
     result = []
-    in_code_block = False
+    fence = None  # the active opening fence token, e.g. "`````", or None
     for line in lines:
-        if line.startswith("```"):
-            in_code_block = not in_code_block
-        if not in_code_block and line.startswith("#"):
+        m = _FENCE_RE.match(line)
+        if m:
+            token = m.group(1)
+            if fence is None:
+                fence = token  # opening fence (info string after it is allowed)
+            elif token[0] == fence[0] and len(token) >= len(fence) and line.strip() == token:
+                fence = None   # closing fence: same char, >= length, bare line
+            result.append(line)
+            continue
+        if fence is None and _ATX_HEADING_RE.match(line):
             line = "#" + line
         result.append(line)
     return "\n".join(result)
+
+
+def _fenced_spans(text: str) -> list[tuple[int, int]]:
+    """(start, end) char spans of fenced code regions in `text`.
+
+    Chronicle now stores tool output untruncated, and its own sessions routinely
+    cat/grep chronicle.md and storage.py — so verbatim payloads legitimately
+    contain Chronicle's structural marker strings (<!-- session: -->,
+    <!-- prompts -->, timeline rows). Marker scans MUST skip fenced regions or a
+    fenced literal marker corrupts the document on the next splice/rebuild.
+    """
+    spans: list[tuple[int, int]] = []
+    fence = None
+    fence_start = 0
+    pos = 0
+    for line in text.split("\n"):
+        line_start = pos
+        pos += len(line) + 1  # +1 for the splitting newline
+        m = _FENCE_RE.match(line)
+        if not m:
+            continue
+        token = m.group(1)
+        if fence is None:
+            fence = token
+            fence_start = line_start
+        elif token[0] == fence[0] and len(token) >= len(fence) and line.strip() == token:
+            spans.append((fence_start, pos))
+            fence = None
+    if fence is not None:
+        spans.append((fence_start, len(text)))
+    return spans
+
+
+def _unfenced_index(text: str, marker: str, start: int = 0, *,
+                    last: bool = False, spans: list | None = None) -> int:
+    """Offset of `marker` OUTSIDE any fenced span (-1 if none). `last=True`
+    returns the last such occurrence (the canonical EOF prompts block)."""
+    if spans is None:
+        spans = _fenced_spans(text)
+    found = -1
+    i = start
+    while True:
+        i = text.find(marker, i)
+        if i == -1:
+            break
+        if not any(s <= i < e for s, e in spans):
+            if not last:
+                return i
+            found = i
+        i += 1
+    return found
 
 
 _PROMPTS_MARKER = "<!-- prompts -->"
@@ -351,8 +431,8 @@ def rebuild_prompts_section(slug: str):
     if not all_prompts:
         # Remove stale prompts section if one exists
         content = chronicle_file.read_text()
-        if _PROMPTS_MARKER in content:
-            marker_idx = content.index(_PROMPTS_MARKER)
+        marker_idx = _unfenced_index(content, _PROMPTS_MARKER, last=True)
+        if marker_idx != -1:
             section_start = content.rfind("\n\n", 0, marker_idx)
             if section_start == -1:
                 section_start = marker_idx
@@ -383,10 +463,12 @@ def rebuild_prompts_section(slug: str):
 
     prompts_section = "\n".join(lines)
 
-    # Replace or append the prompts section
+    # Replace or append the prompts section. Locate the canonical block by its
+    # LAST occurrence OUTSIDE any fence — a fenced literal marker in some session's
+    # verbatim output must never be mistaken for the EOF prompts block.
     content = chronicle_file.read_text()
-    if _PROMPTS_MARKER in content:
-        marker_idx = content.index(_PROMPTS_MARKER)
+    marker_idx = _unfenced_index(content, _PROMPTS_MARKER, last=True)
+    if marker_idx != -1:
         # Find the start (walk back to find blank line before marker)
         section_start = content.rfind("\n\n", 0, marker_idx)
         if section_start == -1:
@@ -428,9 +510,9 @@ def _splice_detail(existing: str, detail_section: str) -> str:
     before it, preserving the prior section's `\n---\n\n` terminator so
     _remove_session_entry can still bound sections; otherwise append at EOF.
     """
-    if _PROMPTS_MARKER not in existing:
+    marker_idx = _unfenced_index(existing, _PROMPTS_MARKER, last=True)
+    if marker_idx == -1:
         return existing + detail_section
-    marker_idx = existing.index(_PROMPTS_MARKER)
     ins = existing.rfind("\n\n", 0, marker_idx)
     if ins == -1:
         return existing[:marker_idx] + detail_section + existing[marker_idx:]

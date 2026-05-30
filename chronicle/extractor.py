@@ -752,6 +752,7 @@ def _append_verbatim_details(lines: list[str], summary: str, content: str) -> No
     lines.append(fence)
     lines.append("")
     lines.append("</details>")
+    lines.append("")  # blank line after </details> so following markdown renders
 
 
 def _append_tool_input_details(lines: list[str], td: ToolDetail) -> None:
@@ -763,108 +764,181 @@ def _append_tool_input_details(lines: list[str], td: ToolDetail) -> None:
         )
 
 
-def timeline_to_log(digest: SessionDigest) -> str:
-    """Generate a full chronological log from the timeline.
+def _esc(text: str, limit: int = 160) -> str:
+    """HTML-escaped one-line snippet for index/label lines that sit OUTSIDE a
+    fence (so a literal '<', '>', or '</details>' can't be parsed as HTML).
+    Backticks are neutralized too: the snippet is truncated and could otherwise
+    chop a closing backtick, leaving a dangling inline-code span. This is a lossy
+    navigation aid; the full content is preserved verbatim in the fenced body."""
+    return html.escape(_index_snippet(text, limit).replace("`", "'"), quote=False)
 
-    No size truncation. Content is extracted/redacted, thinking blocks are
-    skipped, and full tool inputs/outputs are kept in collapsible fenced blocks.
-    This is the archival record in the session markdown.
+
+def _fenced(lines: list[str], content: str) -> None:
+    """Append free-form text inside a dynamic fence (+ trailing blank), so raw
+    transcript text (which may contain '#', '|', '>', '<details>', ``` runs)
+    cannot break out into Markdown/HTML when it sits inside a <details>."""
+    if content is None:
+        content = ""
+    fence = _markdown_fence(content)
+    lines.append(fence)
+    lines.append(content)
+    lines.append(fence)
+    lines.append("")
+
+
+def _tool_counts(turn) -> str:
+    """Compact tool summary for a turn, e.g. 'Bash, Edit x2, Read'."""
+    counts: dict[str, int] = {}
+    order: list[str] = []
+    for td in turn.tool_details:
+        if td.tool not in counts:
+            counts[td.tool] = 0
+            order.append(td.tool)
+        counts[td.tool] += 1
+    return ", ".join(f"{t} x{counts[t]}" if counts[t] > 1 else t for t in order)
+
+
+def _render_tool_detail(lines: list[str], td) -> None:
+    """One tool call: a compact (escaped) label line + full collapsible leaves."""
+    if td.tool == "Edit" and td.path:
+        lines.append(f"EDIT: {_esc(td.path)}")
+        lines.append("")
+        if td.old_content:
+            _append_verbatim_details(lines, f"Edit old_string ({_detail_size(td.old_content)})", td.old_content)
+        if td.content:
+            _append_verbatim_details(lines, f"Edit new_string ({_detail_size(td.content)})", td.content)
+    elif td.tool == "Write" and td.path:
+        lines.append(f"WRITE: {_esc(td.path)}")
+        lines.append("")
+        if td.content:
+            _append_verbatim_details(lines, f"Write content ({_detail_size(td.content)})", td.content)
+    elif td.tool == "Bash":
+        lines.append(f"BASH: {_esc(td.command)}")
+        lines.append("")
+    elif td.tool == "Read":
+        lines.append(f"READ: {_esc(td.path)}")
+        lines.append("")
+    elif td.tool == "Agent":
+        lines.append(f"AGENT: {_esc(td.description)}")
+        lines.append("")
+        if td.content:
+            _append_verbatim_details(lines, f"Agent prompt ({_detail_size(td.content)})", td.content)
+    elif td.tool in ("Glob", "Grep", "WebSearch", "WebFetch", "Skill"):
+        lines.append(f"{td.tool.upper()}: {_esc(td.query)}")
+        lines.append("")
+    elif td.tool.startswith("MCP("):
+        suffix = f": {_esc(td.query)}" if td.query else ""
+        lines.append(f"{_esc(td.tool)}{suffix}")
+        lines.append("")
+    else:
+        lines.append(_esc(td.summary, 200))
+        lines.append("")
+    _append_tool_input_details(lines, td)
+
+
+def timeline_to_log(digest: SessionDigest) -> str:
+    """Render the turn-by-turn archival log as a navigable, collapsible section.
+
+    Two parts, NO truncation:
+      ### Turn index            — one compact, always-visible line per turn
+      ### Full chronological log — a single closed <details> holding every turn
+                                   in full (message text fenced; each tool
+                                   input/output a closed leaf <details>)
+
+    The one-line snippets are a navigation aid that sits ALONGSIDE the full
+    verbatim content, never replacing it. Free-form text is fenced so it cannot
+    break out of the surrounding <details>. Empty (thinking-only) turns are
+    skipped. Per-turn labels are plain text (not headings) so a 446-turn session
+    does not create a 446-entry document outline.
     """
-    lines = []
-    turn_num = 0
+    index: list[str] = []
+    body: list[str] = []
+    user_num = 0
+    tnum = 0
+    n_tool_calls = 0
+    n_outputs = 0
+
+    def _ts(turn):
+        return turn.timestamp[11:19] if turn.timestamp and len(turn.timestamp) > 19 else ""
 
     for turn in digest.timeline:
-        ts = turn.timestamp[11:19] if turn.timestamp and len(turn.timestamp) > 19 else ""
+        ts = _ts(turn)
+        role = turn.role
+        has_text = bool(turn.text and turn.text.strip())
 
-        if turn.role == "user":
-            turn_num += 1
-            lines.append(f"\n[{ts}] USER #{turn_num}:")
-            for line in turn.text.split("\n"):
-                lines.append(f"  {line}")
+        if role == "user":
+            if not has_text:
+                continue
+            user_num += 1
+            tnum += 1
+            tid = f"T{tnum:03d}"
+            index.append(f"- `{tid}` · {ts} · USER #{user_num} — {_esc(turn.text, 120)}")
+            body.append(f"{tid} · [{ts}] · USER #{user_num}")
+            body.append("")
+            _fenced(body, turn.text)
 
-        elif turn.role == "assistant":
-            lines.append(f"\n[{ts}] ASSISTANT:")
-            if turn.text:
-                for line in turn.text.split("\n"):
-                    lines.append(f"  {line}")
+        elif role == "assistant":
+            tools = turn.tool_details
+            if not has_text and not tools:
+                continue
+            tnum += 1
+            tid = f"T{tnum:03d}"
+            n_tool_calls += len(tools)
+            tlabel = _tool_counts(turn)
+            head = f"ASSISTANT — {tlabel}" if tlabel else "ASSISTANT"
+            idx = f"- `{tid}` · {ts} · {head}"
+            if not tlabel and has_text:
+                idx += f" — {_esc(turn.text, 120)}"
+            index.append(idx)
+            body.append(f"{tid} · [{ts}] · {head}")
+            body.append("")
+            if has_text:
+                _fenced(body, turn.text)
+            for td in tools:
+                _render_tool_detail(body, td)
 
-            # Full tool details
-            for td in turn.tool_details:
-                lines.append("")
-                if td.tool == "Edit" and td.path:
-                    lines.append(f"  EDIT: {td.path}")
-                    if td.old_content:
-                        _append_verbatim_details(
-                            lines,
-                            f"Edit old_string ({_detail_size(td.old_content)})",
-                            td.old_content,
-                        )
-                    if td.content:
-                        _append_verbatim_details(
-                            lines,
-                            f"Edit new_string ({_detail_size(td.content)})",
-                            td.content,
-                        )
+        elif role == "tool_result":
+            results = [r for r in turn.tool_results if r and r.strip()]
+            if not results:
+                continue
+            tnum += 1
+            tid = f"T{tnum:03d}"
+            n_outputs += len(results)
+            total = sum(len(r) for r in results)
+            index.append(f"- `{tid}` · {ts} · TOOL OUTPUT — {len(results)} result(s), {total:,} chars")
+            body.append(f"{tid} · [{ts}] · TOOL OUTPUT")
+            body.append("")
+            for result in results:
+                first = result.splitlines()[0] if result.splitlines() else ""
+                if first:
+                    body.append(f"output: {_esc(first)}")
+                    body.append("")
+                _append_verbatim_details(body, f"Full tool output ({_detail_size(result)})", result)
 
-                elif td.tool == "Write" and td.path:
-                    lines.append(f"  WRITE: {td.path}")
-                    if td.content:
-                        _append_verbatim_details(
-                            lines,
-                            f"Write content ({_detail_size(td.content)})",
-                            td.content,
-                        )
+        elif has_text:
+            tnum += 1
+            tid = f"T{tnum:03d}"
+            label = role.upper()
+            index.append(f"- `{tid}` · {ts} · {label} — {_esc(turn.text, 120)}")
+            body.append(f"{tid} · [{ts}] · {label}")
+            body.append("")
+            _fenced(body, turn.text)
 
-                elif td.tool == "Bash":
-                    lines.append(f"  BASH: {_index_snippet(td.command, 160)}")
+    if not index:
+        return ""
 
-                elif td.tool == "Read":
-                    lines.append(f"  READ: {td.path}")
-
-                elif td.tool == "Agent":
-                    lines.append(f"  AGENT: {_index_snippet(td.description, 160)}")
-                    if td.content:
-                        _append_verbatim_details(
-                            lines,
-                            f"Agent prompt ({_detail_size(td.content)})",
-                            td.content,
-                        )
-
-                elif td.tool in ("Glob", "Grep"):
-                    lines.append(f"  {td.tool.upper()}: {_index_snippet(td.query, 160)}")
-
-                elif td.tool in ("WebSearch", "WebFetch", "Skill"):
-                    lines.append(f"  {td.tool.upper()}: {_index_snippet(td.query, 160)}")
-
-                elif td.tool.startswith("MCP("):
-                    suffix = f": {_index_snippet(td.query, 160)}" if td.query else ""
-                    lines.append(f"  {td.tool}{suffix}")
-
-                else:
-                    lines.append(f"  {td.summary}")
-
-                _append_tool_input_details(lines, td)
-
-        elif turn.role == "tool_result":
-            for result in turn.tool_results:
-                lines.append(f"\n[{ts}] TOOL OUTPUT:")
-                first_line = result.splitlines()[0] if result.splitlines() else ""
-                if first_line:
-                    lines.append(f"  {_index_snippet(first_line, 160)}")
-                _append_verbatim_details(
-                    lines,
-                    f"Full tool output ({_detail_size(result)})",
-                    result,
-                )
-
-        elif turn.text:
-            # Unknown / future role: label it generically so the archival log
-            # records new transcript shapes instead of dropping them.
-            lines.append(f"\n[{ts}] {turn.role.upper()}:")
-            for line in turn.text.split("\n"):
-                lines.append(f"  {line}")
-
-    return "\n".join(lines)
+    summary = (f"Full chronological log — {tnum} turns, "
+               f"{n_tool_calls} tool calls, {n_outputs} tool outputs · untruncated")
+    out = ["### Turn index", ""]
+    out.extend(index)
+    out.append("")
+    out.append("### Full chronological log")
+    out.append("")
+    out.append(f"<details><summary>{html.escape(summary, quote=False)}</summary>")
+    out.append("")
+    out.extend(body)
+    out.append("</details>")
+    return "\n".join(out)
 
 
 if __name__ == "__main__":

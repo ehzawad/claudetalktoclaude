@@ -460,7 +460,15 @@ Default paths below use `~/.chronicle/`; set `CHRONICLE_HOME` to move Chronicle'
 
 LLM-structured fields: decisions with status + rationale + alternatives · problems solved (symptom/diagnosis/fix/verification) · developer reasoning moments · follow-up questions · architecture patterns · planning evolution · technical details (stack, errors, commands, config) · notable activity for Agent Teams/tasks/workflows/MCP/new tools · tags and unknown structured extras · per-session cost.
 
-**Full, untruncated archive.** A chronicle is a *complete* record — the turn-by-turn log preserves every tool call's **full** input and **full** output verbatim, no matter how large (full Bash commands, complete Edit/Write/MultiEdit diffs, entire subagent prompts, whole MCP payloads, complete tool output). Nothing is clipped. Long bodies are wrapped in collapsible `<details>` blocks with dynamically-sized backtick fences (always longer than any backtick run inside the content) so embedded code fences can never corrupt the markdown, and they stay scannable via a compact one-line index above each block. Secret redaction still runs on every captured field before anything is written. The only compact-by-design surfaces are the per-project `chronicle.md` **timeline table** (a navigational index whose full title/summary live in the detail section directly below) — every byte of actual history is retained in full.
+**Full, untruncated archive.** A chronicle is a *complete* record — every tool call's **full** input and **full** output is kept verbatim, no matter how large (full Bash commands, complete Edit/Write/MultiEdit diffs, entire subagent prompts, whole MCP payloads, complete tool output). Nothing is clipped. Secret redaction still runs on every captured field before anything is written.
+
+**Navigable, collapsible layout.** Because that archive is huge, the turn-by-turn log is organized for scanning in both `vim` (heading folds) and rendered Markdown (GitHub/VS Code `<details>`):
+
+- A **`### Turn index`** — one compact, always-visible line per turn (`` `T042` · 10:03 · ASSISTANT — Bash, Edit×2 ``) for fast scanning.
+- A **`### Full chronological log`** — a single collapsed `<details>` holding every turn in full. Message text is fenced verbatim; each tool input/output is its own collapsed `<details>` leaf. Per-turn labels are plain text (not headings), so a 446-turn session keeps a clean ~7-entry document outline instead of polluting it.
+- Dynamically-sized backtick fences (always longer than any backtick run inside) mean embedded code fences — and verbatim content that happens to contain Chronicle's own structural markers — can never corrupt the Markdown or the document structure.
+
+The only compact-by-design surface is the per-project `chronicle.md` **timeline table** (a navigational index whose full title/summary live in the detail below). Every byte of actual history is retained in full.
 
 ---
 
