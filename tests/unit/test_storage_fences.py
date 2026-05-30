@@ -12,6 +12,22 @@ from chronicle.storage import (
 )
 
 
+def test_neutralizes_llm_details_tags_in_summary():
+    # When the LLM summarizes a session ABOUT collapsible markdown, its summary
+    # text contains literal <details>/<summary> tags that would otherwise open a
+    # fold swallowing the rest of the document (or close a structural block early).
+    from chronicle.summarizer import _neutralize_details_tags
+    t = ("Layout = a collapsed <details> per session; rejected per-turn "
+         "<details open> and the </details> alternative; <summary>x</summary>")
+    out = _neutralize_details_tags(t)
+    for tag in ("<details>", "<details open>", "</details>", "<summary>", "</summary>"):
+        assert tag not in out
+    assert "&lt;details&gt;" in out and "&lt;/details&gt;" in out
+    # ordinary markdown / angle brackets that are NOT details/summary survive
+    assert _neutralize_details_tags("a < b and **bold** and `<code>`") == \
+        "a < b and **bold** and `<code>`"
+
+
 def test_demote_preserves_hashes_inside_dynamic_fences():
     md = (
         "# Title\n\n"

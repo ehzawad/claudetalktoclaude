@@ -18,6 +18,7 @@ JSONL files grow after Stop (SessionEnd appends), and we want stable IDs.
 """
 
 import hashlib
+import html
 import json
 import os
 import re
@@ -497,6 +498,10 @@ def _timeline_row(entry, sf: str) -> str:
     summary = (entry.summary or "")[:100].replace("\n", " ").replace("|", "/")
     if entry.summary and len(entry.summary) > 100:
         summary += "..."
+    # HTML-escape the LLM-generated cells so a stray '<details>'/'<' can't break
+    # the table or open a fold (titles/summaries are plain phrases).
+    title = html.escape(title, quote=False)
+    summary = html.escape(summary, quote=False)
     return f"| {ts} | [{title}](sessions/{sf}) | {n_decisions} | {summary} |"
 
 

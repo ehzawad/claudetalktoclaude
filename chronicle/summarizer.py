@@ -14,6 +14,7 @@ Provides `async_summarize_session()` for parallel processing.
 import asyncio
 import html
 import json
+import re
 import sys
 from dataclasses import dataclass, field
 
@@ -385,6 +386,19 @@ async def async_summarize_session(digest: SessionDigest) -> ChronicleEntry:
     return _populate_entry_from_structured(data, entry)
 
 
+def _neutralize_details_tags(text: str) -> str:
+    """Escape any <details>/<summary> tags the LLM emitted inside its summary
+    text (it routinely happens when summarizing a session about collapsible
+    Markdown). Left raw, an LLM '<details>' opens a fold that swallows the rest
+    of the rendered document, and a '</details>' closes a structural block early.
+    Other Markdown (bold, lists, inline code) is preserved untouched."""
+    return re.sub(
+        r"</?(?:details|summary)\b[^>]*>",
+        lambda m: m.group(0).replace("<", "&lt;").replace(">", "&gt;"),
+        text, flags=re.IGNORECASE,
+    )
+
+
 def entry_to_session_markdown(entry: ChronicleEntry) -> str:
     """Format a ChronicleEntry as a detailed per-session markdown record."""
     lines = []
@@ -631,34 +645,42 @@ def entry_to_session_markdown(entry: ChronicleEntry) -> str:
             lines.append(f"- `{f}`")
         lines.append("")
 
+    # Everything above is LLM-generated summary text that may itself contain raw
+    # <details>/<summary> tags (e.g. when summarizing a session about collapsible
+    # Markdown). Neutralize those so they can't open/close the structural
+    # collapsible blocks Chronicle adds next. The turn log and prompts blocks
+    # below are already render-safe and must NOT be neutralized.
+    body = [_neutralize_details_tags("\n".join(lines))]
+
     # Turn-by-turn chronological log. The log renders full tool inputs/outputs
     # inside their own collapsible fenced blocks; do not wrap the whole section
     # in one fence or those blocks would become inert text.
     if entry.turn_log:
-        lines.append("## Turn-by-turn log")
-        lines.append("")
-        lines.append(entry.turn_log)
-        lines.append("")
+        body.append("")
+        body.append("## Turn-by-turn log")
+        body.append("")
+        body.append(entry.turn_log)
+        body.append("")
 
     # User prompts (verbatim) at the end as reference
     if entry.user_prompts:
-        lines.append("---")
-        lines.append("")
-        lines.append("<details><summary>User prompts (verbatim)</summary>")
-        lines.append("")
+        body.append("---")
+        body.append("")
+        body.append("<details><summary>User prompts (verbatim)</summary>")
+        body.append("")
         for i, prompt in enumerate(entry.user_prompts, 1):
             pts = prompt.timestamp[:19].replace("T", " ") if prompt.timestamp else ""
-            lines.append(f"**Prompt {i}** ({pts}):")
+            body.append(f"**Prompt {i}** ({pts}):")
             # HTML-escape so a prompt containing '</details>' or other raw HTML
             # can't early-close this collapsible block (the true unescaped prompt
             # is also preserved, fenced, in the Full chronological log above).
             for pline in prompt.text.split("\n"):
-                lines.append(f"> {html.escape(pline, quote=False)}")
-            lines.append("")
-        lines.append("</details>")
-        lines.append("")
+                body.append(f"> {html.escape(pline, quote=False)}")
+            body.append("")
+        body.append("</details>")
+        body.append("")
 
-    return "\n".join(lines)
+    return "\n".join(body)
 
 
 if __name__ == "__main__":
