@@ -107,7 +107,20 @@ def test_chronicle_binary_raises_when_missing(tmp_home, monkeypatch):
     assert "chronicle binary not found" in str(excinfo.value)
 
 
-def test_install_service_records_bootstrap_error(monkeypatch):
+def test_chronicle_binary_rejects_non_executable(tmp_path, monkeypatch):
+    import chronicle.service as service
+
+    binary = tmp_path / "chronicle"
+    binary.write_text("not executable")
+    binary.chmod(0o644)
+    monkeypatch.setattr(service.shutil, "which", lambda name: str(binary))
+
+    with pytest.raises(RuntimeError) as excinfo:
+        service._chronicle_binary()
+    assert "not an executable file" in str(excinfo.value)
+
+
+def test_install_service_promotes_bootstrap_error(monkeypatch):
     import chronicle.service as service
 
     monkeypatch.setattr(service, "platform_key", lambda: "macos")
@@ -118,6 +131,36 @@ def test_install_service_records_bootstrap_error(monkeypatch):
 
     monkeypatch.setattr(service, "_mac_install", fake_mac_install)
 
-    accepted = service.install_service()
-    assert accepted is False
+    with pytest.raises(RuntimeError) as excinfo:
+        service.install_service()
+    assert "launchctl bootstrap failed: boom" in str(excinfo.value)
     assert service.last_service_error() == "launchctl bootstrap failed: boom"
+
+
+def test_linux_install_without_systemctl_is_non_destructive(tmp_path, monkeypatch):
+    import chronicle.service as service
+
+    unit = tmp_path / "chronicle-daemon.service"
+    monkeypatch.setattr(service, "_LINUX_UNIT_PATH", unit)
+    monkeypatch.setattr(service, "platform_key", lambda: "linux")
+    monkeypatch.setattr(service.shutil, "which", lambda name: None)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        service.install_service()
+
+    assert "systemctl" in str(excinfo.value)
+    assert not unit.exists()
+
+
+def test_linux_uninstall_removes_unit_without_systemctl(tmp_path, monkeypatch):
+    import chronicle.service as service
+
+    unit = tmp_path / "chronicle-daemon.service"
+    unit.write_text("[Service]\n")
+    monkeypatch.setattr(service, "_LINUX_UNIT_PATH", unit)
+    monkeypatch.setattr(service, "platform_key", lambda: "linux")
+    monkeypatch.setattr(service.shutil, "which", lambda name: None)
+
+    service.uninstall_service()
+
+    assert not unit.exists()
