@@ -7,13 +7,24 @@ user can fix (or back up) the file themselves.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
 
+def _chronicle_entries(data: dict, event: str) -> list[dict]:
+    from chronicle.install_hooks import _is_chronicle_hook_command
+
+    return [
+        hook
+        for group in data["hooks"][event]
+        for hook in group.get("hooks", [])
+        if _is_chronicle_hook_command(hook.get("command"))
+    ]
+
+
 def test_creates_fresh_settings_when_absent(tmp_path):
     from chronicle.install_hooks import install_hooks
+
     settings = tmp_path / "settings.json"
     install_hooks(str(settings))
     assert settings.exists()
@@ -22,8 +33,30 @@ def test_creates_fresh_settings_when_absent(tmp_path):
     assert "SessionStart" in data["hooks"]
 
 
+def test_installs_absolute_exec_form_hooks(tmp_path, monkeypatch):
+    """Hooks must not depend on a non-interactive shell's PATH or profiles."""
+    from chronicle.install_hooks import install_hooks
+
+    home = tmp_path / "home with spaces"
+    monkeypatch.setenv("HOME", str(home))
+    settings = home / ".claude" / "settings.json"
+
+    install_hooks(str(settings))
+    data = json.loads(settings.read_text())
+    expected = str(home / ".local" / "bin" / "chronicle-hook")
+
+    for event in ("SessionStart", "Stop", "UserPromptSubmit", "SessionEnd"):
+        entries = _chronicle_entries(data, event)
+        assert len(entries) == 1
+        assert entries[0]["command"] == expected
+        assert entries[0]["args"] == []
+        # No shell-form matcher is needed for lifecycle events that always run.
+        assert "matcher" not in data["hooks"][event][-1]
+
+
 def test_merges_into_existing_valid_settings(tmp_path):
     from chronicle.install_hooks import install_hooks
+
     settings = tmp_path / "settings.json"
     settings.write_text(json.dumps({
         "theme": "dark",
@@ -38,6 +71,7 @@ def test_merges_into_existing_valid_settings(tmp_path):
 
 def test_malformed_json_refuses_with_exit_code(tmp_path, capsys):
     from chronicle.install_hooks import install_hooks
+
     settings = tmp_path / "settings.json"
     settings.write_text("{ not json,}")  # invalid
     with pytest.raises(SystemExit) as excinfo:
@@ -51,6 +85,7 @@ def test_malformed_json_refuses_with_exit_code(tmp_path, capsys):
 
 def test_non_object_json_refuses(tmp_path, capsys):
     from chronicle.install_hooks import install_hooks
+
     settings = tmp_path / "settings.json"
     settings.write_text('"just a string"')
     with pytest.raises(SystemExit) as excinfo:
@@ -60,25 +95,22 @@ def test_non_object_json_refuses(tmp_path, capsys):
 
 def test_idempotent_reinstall_doesnt_duplicate_hooks(tmp_path):
     from chronicle.install_hooks import install_hooks
+
     settings = tmp_path / "settings.json"
     install_hooks(str(settings))
     install_hooks(str(settings))  # run again
     data = json.loads(settings.read_text())
     for event in ("SessionStart", "Stop", "UserPromptSubmit", "SessionEnd"):
-        # Each event should have exactly ONE chronicle-hook command entry.
-        groups = data["hooks"][event]
-        chronicle_count = sum(
-            1 for g in groups
-            for h in g.get("hooks", [])
-            if h.get("command") == "chronicle-hook"
+        entries = _chronicle_entries(data, event)
+        assert len(entries) == 1, (
+            f"{event}: expected 1 chronicle-hook, got {len(entries)}"
         )
-        assert chronicle_count == 1, (
-            f"{event}: expected 1 chronicle-hook, got {chronicle_count}"
-        )
+        assert entries[0]["args"] == []
 
 
 def test_reinstall_preserves_unrelated_hooks_in_same_matcher_group(tmp_path):
     from chronicle.install_hooks import install_hooks
+
     settings = tmp_path / "settings.json"
     settings.write_text(json.dumps({
         "hooks": {
@@ -95,19 +127,16 @@ def test_reinstall_preserves_unrelated_hooks_in_same_matcher_group(tmp_path):
     data = json.loads(settings.read_text())
     hooks = data["hooks"]["SessionStart"]
     custom_count = sum(
-        1 for g in hooks for h in g.get("hooks", [])
-        if h.get("command") == "my-custom-logger"
-    )
-    chronicle_count = sum(
-        1 for g in hooks for h in g.get("hooks", [])
-        if h.get("command") == "chronicle-hook"
+        1 for group in hooks for hook in group.get("hooks", [])
+        if hook.get("command") == "my-custom-logger"
     )
     assert custom_count == 1
-    assert chronicle_count == 1
+    assert len(_chronicle_entries(data, "SessionStart")) == 1
 
 
 def test_reinstall_treats_absolute_path_chronicle_hook_as_existing(tmp_path):
-    from chronicle.install_hooks import install_hooks
+    from chronicle.install_hooks import _chronicle_hook_path, install_hooks
+
     settings = tmp_path / "settings.json"
     settings.write_text(json.dumps({
         "hooks": {
@@ -124,19 +153,29 @@ def test_reinstall_treats_absolute_path_chronicle_hook_as_existing(tmp_path):
     data = json.loads(settings.read_text())
     hooks = data["hooks"]["Stop"]
     notify_count = sum(
-        1 for g in hooks for h in g.get("hooks", [])
-        if h.get("command") == "notify-send done"
+        1 for group in hooks for hook in group.get("hooks", [])
+        if hook.get("command") == "notify-send done"
     )
-    chronicle_count = sum(
-        1 for g in hooks for h in g.get("hooks", [])
-        if h.get("command") == "chronicle-hook"
-    )
+    entries = _chronicle_entries(data, "Stop")
     assert notify_count == 1
-    assert chronicle_count == 1
+    assert len(entries) == 1
+    assert entries[0]["command"] == str(_chronicle_hook_path())
+    assert entries[0]["args"] == []
+
+
+def test_recognizes_direct_and_shell_form_commands_with_spaces():
+    from chronicle.install_hooks import _is_chronicle_hook_command as is_chronicle
+
+    direct = "/home/First Last/.local/bin/chronicle-hook"
+    quoted = '"/home/First Last/.local/bin/chronicle-hook" --verbose'
+    assert is_chronicle(direct)
+    assert is_chronicle(quoted)
+    assert not is_chronicle('"unterminated')
 
 
 def test_invalid_hooks_value_refuses_cleanly(tmp_path, capsys):
     from chronicle.install_hooks import install_hooks
+
     settings = tmp_path / "settings.json"
     settings.write_text(json.dumps({"hooks": ["not", "a", "dict"]}))
     with pytest.raises(SystemExit) as excinfo:
