@@ -8,7 +8,6 @@ vs "terminal failure — use --retry-failed").
 from .storage import is_succeeded, is_terminal_failure
 
 _SELF_SESSION_MARKERS = (
-    "You are a Decision Chronicler",
     "You are writing a high-fidelity engineering chronicle",
 )
 

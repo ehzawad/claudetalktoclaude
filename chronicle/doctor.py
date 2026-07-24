@@ -24,7 +24,7 @@ from .config import (
     processed_dir, processing_lock_path,
 )
 from .extractor import _session_id_from_jsonl
-from .install_hooks import _is_chronicle_hook_command
+from .install_hooks import _chronicle_hook_path, _is_chronicle_hook_entry
 from .locks import daemon_is_running, processing_lock_held
 from .mode import get_processing_mode
 from .storage import is_succeeded, is_terminal_failure, list_failed
@@ -90,7 +90,7 @@ def _hook_install_status() -> tuple[int | None, str | None, str]:
             if not isinstance(entries, list):
                 continue
             for entry in entries:
-                if isinstance(entry, dict) and _is_chronicle_hook_command(entry.get("command")):
+                if _is_chronicle_hook_entry(entry):
                     count += 1
     return count, None, str(settings_path)
 
@@ -137,7 +137,9 @@ def collect_diagnostics() -> dict[str, Any]:
 
     bin_dir = Path.home() / ".local" / "bin"
     chronicle_path = bin_dir / "chronicle"
-    chronicle_hook_path = bin_dir / "chronicle-hook"
+    # Report the path Chronicle would actually configure, not a hardcoded
+    # guess — console-script installs put chronicle-hook outside ~/.local/bin.
+    chronicle_hook_path = _chronicle_hook_path()
     runtime_binary = chronicle_dir() / "runtime" / "chronicle"
     hook_count, hook_warning, settings_path = _hook_install_status()
     chronicle_on_path = shutil.which("chronicle")

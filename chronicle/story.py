@@ -46,12 +46,7 @@ def _load_session_content(project_dir: Path) -> list[tuple[str, str]]:
     pairs = []
     for md_file in sorted(sessions_dir.glob("*.md")):
         content = md_file.read_text(errors="ignore")
-        # Strip older triple-fenced turn logs and verbatim prompts — too noisy
-        # for synthesis. Current four-fenced archival logs are retained.
-        content = re.sub(
-            r"## Turn-by-turn log\n\n```.*?```\n\n",
-            "", content, flags=re.DOTALL
-        )
+        # Strip the verbatim prompts block — too noisy for synthesis.
         content = re.sub(
             r"---\n\n<details><summary>User prompts \(verbatim\)</summary>.*?</details>\n",
             "", content, flags=re.DOTALL

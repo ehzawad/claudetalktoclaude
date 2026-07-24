@@ -3,45 +3,83 @@
 Called by install.sh. Merges hooks into existing settings without
 overwriting other keys. Also exposes uninstall_hooks() for the
 `chronicle uninstall` subcommand.
+
+Hook entries use Claude Code's *exec form*: `args` is present, so `command`
+is spawned directly as an executable with no `sh -c` layer. Per the hooks
+reference, "A command hook runs as exec form when `args` is set, and shell
+form when `args` is omitted." Exec form matters because command hooks run
+outside an interactive shell, so a bare `chronicle-hook` would depend on
+whatever PATH the Claude Code process happened to inherit — which fails when
+Claude Code is launched from the macOS GUI or an IDE rather than a terminal.
+
+`matcher` is omitted: the reference documents an omitted matcher as "match
+all", which is what these lifecycle events want.
 """
 
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
-CHRONICLE_HOOKS = {
-    "SessionStart": [
-        {
-            "matcher": "",
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": "chronicle-hook",
-                    "statusMessage": "Loading chronicle context...",
-                }
-            ],
-        }
-    ],
-    "Stop": [
-        {
-            "matcher": "",
-            "hooks": [{"type": "command", "command": "chronicle-hook", "async": True}],
-        }
-    ],
-    "UserPromptSubmit": [
-        {
-            "matcher": "",
-            "hooks": [{"type": "command", "command": "chronicle-hook", "async": True}],
-        }
-    ],
-    "SessionEnd": [
-        {
-            "matcher": "",
-            "hooks": [{"type": "command", "command": "chronicle-hook", "async": True}],
-        }
-    ],
-}
+# Set by install.sh to the symlink it is about to create. Needed because the
+# installer configures hooks BEFORE placing the symlink, so no amount of
+# probing the filesystem can discover the right path at that moment.
+_HOOK_PATH_ENV = "CHRONICLE_HOOK_PATH"
+
+
+def _chronicle_hook_path() -> Path:
+    """Resolve the chronicle-hook executable to write into settings.json.
+
+    Resolution order, most authoritative first:
+
+    1. $CHRONICLE_HOOK_PATH — set by install.sh, which knows the path it is
+       about to create. Allowed not to exist yet.
+    2. Sibling of a frozen binary, if it exists.
+    3. shutil.which() — finds console-script installs (pip / uv / venv /
+       Homebrew), where pyproject.toml's `chronicle-hook` entry point lands
+       somewhere other than ~/.local/bin.
+    4. The install.sh default.
+
+    Resolved lazily so tests and installs that override HOME see fresh paths.
+    """
+    env = os.environ.get(_HOOK_PATH_ENV)
+    if env:
+        return Path(env).expanduser()
+
+    if getattr(sys, "frozen", False):
+        sibling = Path(sys.executable).resolve().parent / "chronicle-hook"
+        if sibling.exists():
+            return sibling
+
+    found = shutil.which("chronicle-hook")
+    if found:
+        return Path(found)
+
+    return Path.home() / ".local" / "bin" / "chronicle-hook"
+
+
+def _chronicle_hooks() -> dict:
+    """Build the canonical Claude Code hook configuration for this user."""
+    command = str(_chronicle_hook_path())
+    sync_hook = {
+        "type": "command",
+        "command": command,
+        "args": [],
+        "statusMessage": "Loading chronicle context...",
+    }
+    async_hook = {
+        "type": "command",
+        "command": command,
+        "args": [],
+        "async": True,
+    }
+    return {
+        "SessionStart": [{"hooks": [dict(sync_hook)]}],
+        "Stop": [{"hooks": [dict(async_hook)]}],
+        "UserPromptSubmit": [{"hooks": [dict(async_hook)]}],
+        "SessionEnd": [{"hooks": [dict(async_hook)]}],
+    }
 
 
 def _invalid_hooks_error(path: Path, detail: str) -> None:
@@ -90,8 +128,8 @@ def install_hooks(settings_path: str):
     # Merge Chronicle hooks into existing hooks without replacing user entries.
     # For each event, remove only the Chronicle hook entries from existing
     # matcher groups, preserve unrelated user hooks, then append Chronicle's
-    # canonical matcher group.
-    for event_name, chronicle_matchers in CHRONICLE_HOOKS.items():
+    # canonical group.
+    for event_name, chronicle_matchers in _chronicle_hooks().items():
         existing = hooks.get(event_name, [])
         if existing is None:
             existing = []
@@ -110,7 +148,7 @@ def install_hooks(settings_path: str):
 
             kept_entries = []
             for entry in entries:
-                if isinstance(entry, dict) and _is_chronicle_hook_command(entry.get("command")):
+                if _is_chronicle_hook_entry(entry):
                     continue
                 kept_entries.append(entry)
 
@@ -127,19 +165,44 @@ def install_hooks(settings_path: str):
     path.write_text(json.dumps(settings, indent=2) + "\n")
     print(f"Configured hooks in {path}")
 
+    # Exec form has no shell and therefore no PATH fallback: a wrong path is a
+    # silently dead hook. install.sh legitimately configures hooks before it
+    # creates the symlink, so only warn when nobody told us the path.
+    hook_path = _chronicle_hook_path()
+    if not os.environ.get(_HOOK_PATH_ENV) and not hook_path.exists():
+        print(
+            f"WARN: {hook_path} does not exist. Claude Code spawns this path "
+            f"directly (exec form), so the hooks will not run until it does. "
+            f"Re-run install.sh, or set {_HOOK_PATH_ENV} to the correct "
+            f"chronicle-hook executable and re-run `chronicle install-hooks`.",
+            file=sys.stderr,
+        )
 
-def _is_chronicle_hook_command(cmd) -> bool:
-    """True if a hook command invokes chronicle-hook.
 
-    Accepts literal 'chronicle-hook' as well as absolute paths like
-    '/Users/ehz/.local/bin/chronicle-hook', and tolerates trailing flags
-    ('chronicle-hook --foo'). Splits on whitespace, takes the first token,
-    compares basename.
+def _is_chronicle_hook_entry(entry) -> bool:
+    """True if a settings.json hook entry is one Chronicle installed.
+
+    Exactly one shape matches: Claude Code's exec form, i.e. an `args` key is
+    present (its contents are irrelevant; `args: []` is still exec form). The
+    whole `command` string is then one executable path, which may legitimately
+    contain spaces ('/home/First Last/.local/bin/chronicle-hook'), so it is
+    basename-compared as-is and never shell-tokenized.
+
+    A missing `type` is tolerated (Claude Code defaults it to "command"); only
+    an explicitly different type is rejected. That is defensive parsing of a
+    hand-edited settings.json, not backwards compatibility — refusing to match
+    a `type`-less entry would strand it in install, uninstall, AND doctor.
     """
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("type", "command") != "command":
+        return False
+    if "args" not in entry:
+        return False
+    cmd = entry.get("command")
     if not isinstance(cmd, str) or not cmd.strip():
         return False
-    first = cmd.strip().split(None, 1)[0]
-    return os.path.basename(first) == "chronicle-hook"
+    return os.path.basename(cmd.strip()) == "chronicle-hook"
 
 
 def uninstall_hooks(settings_path: str, dry_run: bool = False) -> int:
@@ -193,8 +256,7 @@ def uninstall_hooks(settings_path: str, dry_run: bool = False) -> int:
                 continue
             kept_entries = []
             for h in entries:
-                cmd = (h or {}).get("command") if isinstance(h, dict) else None
-                if _is_chronicle_hook_command(cmd):
+                if _is_chronicle_hook_entry(h):
                     removed += 1
                 else:
                     kept_entries.append(h)

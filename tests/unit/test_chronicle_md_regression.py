@@ -176,3 +176,53 @@ def test_long_title_reprocess_no_orphan_heading(isolated_chronicle):
     assert content.split("\n").count("## " + long_title) == 1, "orphaned long-title heading line"
     assert content.count("<!-- session:") == 1
     assert "NARR_REPROC" in content
+
+
+def test_lost_timeline_end_marker_is_rebuilt_without_losing_bodies(isolated_chronicle):
+    """A hand edit that deletes `<!-- /timeline -->` must not cost session detail.
+
+    Covers the repair branch that replaced the removed _retrofit_timeline():
+    with no unfenced end marker there is nothing to splice against, so a fresh
+    timeline block is rebuilt under the H1 and the existing body is preserved.
+    """
+    from chronicle import storage
+    from chronicle.config import project_chronicle_dir
+    slug = "-tmp-lostmarker"
+
+    storage.write_chronicle(_entry("s1", 1, slug), _digest("s1", slug))
+    md_path = project_chronicle_dir(slug) / "chronicle.md"
+    before = md_path.read_text()
+    assert storage._TIMELINE_END in before
+
+    # Simulate the hand edit: drop the end marker entirely.
+    md_path.write_text(before.replace(storage._TIMELINE_END + "\n", ""))
+
+    storage.write_chronicle(_entry("s2", 2, slug), _digest("s2", slug))
+    after = md_path.read_text()
+
+    # Repaired to exactly one well-formed timeline block...
+    assert after.count(storage._TIMELINE_END) == 1
+    assert after.count(storage._TIMELINE_HEADER) == 1
+    assert after.count(storage._DETAIL_START) == 1
+    # ...the H1 survives and still leads the file...
+    assert after.lstrip().startswith("# Chronicle:")
+    # ...and NO session body was lost.
+    assert "NARRATIVE_1" in after
+    assert "NARRATIVE_2" in after
+
+
+def test_chronicle_md_without_any_heading_repairs_instead_of_crashing(isolated_chronicle):
+    """find() not index(): a file with no '# ' heading must still append."""
+    from chronicle import storage
+    from chronicle.config import project_chronicle_dir
+    slug = "-tmp-noheading"
+
+    storage.write_chronicle(_entry("s1", 1, slug), _digest("s1", slug))
+    md_path = project_chronicle_dir(slug) / "chronicle.md"
+    md_path.write_text("stray text with no heading and no markers\n")
+
+    storage.write_chronicle(_entry("s2", 2, slug), _digest("s2", slug))
+    after = md_path.read_text()
+    assert "stray text with no heading" in after
+    assert "NARRATIVE_2" in after
+    assert after.count(storage._TIMELINE_END) == 1

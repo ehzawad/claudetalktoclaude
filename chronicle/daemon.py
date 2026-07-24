@@ -244,11 +244,7 @@ async def _process_batch(events: list[tuple[str, dict]], config: dict) -> list[t
             # Carry the ORIGINAL pending key (sid, ev) alongside the result so
             # requeue stays correct even if extract overwrote digest.session_id
             # to differ from the file stem we were queued under (BUG-20 FIX 1).
-            if len(result) == 2:
-                digest, entry = result
-                before_fingerprint = None
-            else:
-                digest, entry, before_fingerprint = result
+            digest, entry, before_fingerprint = result
             pending_writes.append((sid, ev, digest, entry, before_fingerprint))
 
     pending_writes.sort(key=lambda t: t[2].start_time)
@@ -404,22 +400,6 @@ def _compact_events_if_safe(offset: int, pending_sessions: dict) -> int:
         return offset
 
 
-# Singleton and inode-validation helpers live in chronicle.locks now.
-# Thin shims kept so callers that still import from chronicle.daemon
-# (chronicle.query._is_running, older tests) don't have to chase the move.
-
-def _acquire_lock() -> bool:
-    return acquire_daemon_lock()
-
-
-def _lock_still_valid() -> bool:
-    return daemon_lock_still_valid()
-
-
-def _is_running() -> tuple[bool, int | None]:
-    return daemon_is_running()
-
-
 def _scan_for_unprocessed(pending_sessions: dict, config: dict) -> int:
     """Scan ~/.claude/projects/ for non-terminal sessions that need processing.
 
@@ -493,8 +473,8 @@ async def run_daemon_async():
     """
     save_default_config()
 
-    if not _acquire_lock():
-        running, pid = _is_running()
+    if not acquire_daemon_lock():
+        running, pid = daemon_is_running()
         if running:
             print(f"[chronicle] daemon already running (pid {pid})")
             sys.exit(1)
@@ -539,7 +519,7 @@ async def run_daemon_async():
                     continue
                 idle_printed_once = False
 
-                if not _lock_still_valid():
+                if not daemon_lock_still_valid():
                     print("[chronicle] PID file replaced — another daemon took over, exiting")
                     break
 
@@ -664,7 +644,7 @@ def main():
     args = parser.parse_args()
 
     if args.status:
-        running, pid = _is_running()
+        running, pid = daemon_is_running()
         if running:
             print(f"Chronicle daemon is running (pid {pid})")
         else:
@@ -672,7 +652,7 @@ def main():
         sys.exit(0)
 
     if args.stop:
-        running, pid = _is_running()
+        running, pid = daemon_is_running()
         if running and pid:
             os.kill(pid, signal.SIGTERM)
             print(f"Sent SIGTERM to daemon (pid {pid})")

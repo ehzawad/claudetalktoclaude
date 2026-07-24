@@ -164,7 +164,7 @@ class TestBatchWriteGuardBug12a:
             is_error = False
 
         async def fake_one(event, config, semaphore):
-            return (_D(event["sid"]), _E())
+            return (_D(event["sid"]), _E(), None)
 
         attempted = []
 

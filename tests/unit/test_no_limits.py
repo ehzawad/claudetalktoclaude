@@ -46,12 +46,10 @@ class TestDigestNoSizeCap:
         return d
 
     def test_no_truncation_by_default(self):
+        """No size cap, and no knob to reintroduce one."""
+        import inspect
+        assert "max_chars" not in inspect.signature(extractor.digest_to_text).parameters
         out = extractor.digest_to_text(self._digest_with(200_000))
-        assert "omitted" not in out
-        assert ("x" * 200_000) in out
-
-    def test_max_chars_is_ignored(self):
-        out = extractor.digest_to_text(self._digest_with(200_000), max_chars=50_000)
         assert "omitted" not in out
         assert ("x" * 200_000) in out
 

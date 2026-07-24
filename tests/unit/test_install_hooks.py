@@ -7,9 +7,20 @@ user can fix (or back up) the file themselves.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
+
+from chronicle.install_hooks import _is_chronicle_hook_entry
+
+
+def _chronicle_entries(data: dict, event: str) -> list[dict]:
+    """Chronicle now installs an absolute exec-form path, not a bare name."""
+    return [
+        hook
+        for group in data["hooks"][event]
+        for hook in group.get("hooks", [])
+        if _is_chronicle_hook_entry(hook)
+    ]
 
 
 def test_creates_fresh_settings_when_absent(tmp_path):
@@ -66,15 +77,11 @@ def test_idempotent_reinstall_doesnt_duplicate_hooks(tmp_path):
     data = json.loads(settings.read_text())
     for event in ("SessionStart", "Stop", "UserPromptSubmit", "SessionEnd"):
         # Each event should have exactly ONE chronicle-hook command entry.
-        groups = data["hooks"][event]
-        chronicle_count = sum(
-            1 for g in groups
-            for h in g.get("hooks", [])
-            if h.get("command") == "chronicle-hook"
+        entries = _chronicle_entries(data, event)
+        assert len(entries) == 1, (
+            f"{event}: expected 1 chronicle-hook, got {len(entries)}"
         )
-        assert chronicle_count == 1, (
-            f"{event}: expected 1 chronicle-hook, got {chronicle_count}"
-        )
+        assert entries[0]["args"] == []
 
 
 def test_reinstall_preserves_unrelated_hooks_in_same_matcher_group(tmp_path):
@@ -85,7 +92,7 @@ def test_reinstall_preserves_unrelated_hooks_in_same_matcher_group(tmp_path):
             "SessionStart": [{
                 "matcher": "",
                 "hooks": [
-                    {"type": "command", "command": "chronicle-hook"},
+                    {"type": "command", "command": "chronicle-hook", "args": []},
                     {"type": "command", "command": "my-custom-logger"},
                 ],
             }],
@@ -98,15 +105,11 @@ def test_reinstall_preserves_unrelated_hooks_in_same_matcher_group(tmp_path):
         1 for g in hooks for h in g.get("hooks", [])
         if h.get("command") == "my-custom-logger"
     )
-    chronicle_count = sum(
-        1 for g in hooks for h in g.get("hooks", [])
-        if h.get("command") == "chronicle-hook"
-    )
     assert custom_count == 1
-    assert chronicle_count == 1
+    assert len(_chronicle_entries(data, "SessionStart")) == 1
 
 
-def test_reinstall_treats_absolute_path_chronicle_hook_as_existing(tmp_path):
+def test_reinstall_treats_exec_form_absolute_path_as_existing(tmp_path):
     from chronicle.install_hooks import install_hooks
     settings = tmp_path / "settings.json"
     settings.write_text(json.dumps({
@@ -114,7 +117,8 @@ def test_reinstall_treats_absolute_path_chronicle_hook_as_existing(tmp_path):
             "Stop": [{
                 "matcher": "",
                 "hooks": [
-                    {"type": "command", "command": "/Users/ehz/.local/bin/chronicle-hook --verbose"},
+                    {"type": "command", "command": "/Users/ehz/.local/bin/chronicle-hook",
+                     "args": ["--verbose"]},
                     {"type": "command", "command": "notify-send done"},
                 ],
             }],
@@ -127,12 +131,14 @@ def test_reinstall_treats_absolute_path_chronicle_hook_as_existing(tmp_path):
         1 for g in hooks for h in g.get("hooks", [])
         if h.get("command") == "notify-send done"
     )
-    chronicle_count = sum(
-        1 for g in hooks for h in g.get("hooks", [])
-        if h.get("command") == "chronicle-hook"
-    )
     assert notify_count == 1
-    assert chronicle_count == 1
+    assert len(_chronicle_entries(data, "Stop")) == 1
+    # Belt and braces: a lingering duplicate must fail loudly rather than be
+    # filtered out of view by _chronicle_entries.
+    assert sum(
+        1 for g in hooks for h in g.get("hooks", [])
+        if "chronicle-hook" in str(h.get("command", ""))
+    ) == 1
 
 
 def test_invalid_hooks_value_refuses_cleanly(tmp_path, capsys):

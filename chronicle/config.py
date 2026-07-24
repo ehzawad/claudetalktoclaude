@@ -8,11 +8,7 @@ The old module-level CONSTANT style (e.g. `CHRONICLE_DIR = Path.home() / ...`)
 was evaluated once at import time, which made tests dependent on when
 modules were first imported. The function form avoids that fragility.
 
-For external reading convenience, the CONSTANT names are still exposed
-via PEP 562 `__getattr__` — but *only* attribute access
-(`config.CHRONICLE_DIR`) re-evaluates lazily; `from config import
-CHRONICLE_DIR` still snapshots (Python semantics). Prefer the function
-form for anything inside this package.
+Use the function form everywhere; there are no module-level path constants.
 """
 from __future__ import annotations
 
@@ -307,28 +303,3 @@ def project_name_matches(query: str, slug: str) -> bool:
     if not slugged.strip("-"):
         return False
     return slugged in slug
-
-
-# ---------- PEP 562 lazy-constant compat shim ----------
-# Kept for external code that might do `chronicle.config.CHRONICLE_DIR`.
-# Internal code should use the function form above.
-
-_LAZY_CONSTANTS = {
-    "CHRONICLE_DIR": chronicle_dir,
-    "EVENTS_FILE": events_file,
-    "OFFSET_FILE": offset_file,
-    "PID_FILE": pid_file,
-    "PROCESSING_LOCK": processing_lock_path,
-    "CONFIG_FILE": config_file,
-    "PROJECTS_DIR": projects_dir,
-    "PROCESSED_DIR": processed_dir,
-    "FAILED_DIR": failed_dir,
-    "CLAUDE_PROJECTS": claude_projects,
-}
-
-
-def __getattr__(name: str):
-    factory = _LAZY_CONSTANTS.get(name)
-    if factory is not None:
-        return factory()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

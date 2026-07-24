@@ -9,7 +9,6 @@ Usage:
         Summarize pending sessions. --retry-failed retries terminal failures
         after the underlying issue has been fixed. --force reprocesses
         already-successful sessions.
-        `chronicle batch` is a compatibility alias for `chronicle process`.
 
     chronicle query projects
         Per-project counts: processed / pending / terminal-failed.
@@ -104,7 +103,7 @@ def main():
     if command == "daemon":
         from .daemon import main as daemon_main
         daemon_main()
-    elif command in ("process", "batch"):
+    elif command == "process":
         from .batch import main as batch_main
         batch_main()
     elif command == "query":
@@ -126,12 +125,6 @@ def main():
     elif command == "doctor":
         from .doctor import run as doctor_run
         sys.exit(doctor_run())
-    elif command == "reload":
-        # Deprecated: the installed artifact is a self-contained binary, there
-        # is no local source tree to reinstall from. Redirect to `update`.
-        print("`chronicle reload` is deprecated in binary builds; use `chronicle update`.",
-              file=sys.stderr)
-        update_install()
     elif command == "update":
         update_install()
     elif command == "uninstall":
@@ -160,28 +153,23 @@ def install_daemon():
     # ordering matters.
     set_processing_mode("background")
     try:
-        accepted = service.install_service()
+        service.install_service()
     except RuntimeError as e:
+        # install_service() now raises on every failure, so this is the single
+        # failure path. Roll mode back to foreground (BUG-16, Option B) so
+        # doctor doesn't report background intent with no running daemon and
+        # the SessionStart hook doesn't keep respawning a daemon that never
+        # starts. Any service file already written is left for inspection.
         print(f"ERROR: {e}", file=sys.stderr)
-        # Roll back mode so doctor doesn't lie about intent.
         set_processing_mode("foreground")
+        print("Rolled processing_mode back to foreground.", file=sys.stderr)
+        if service.service_installed():
+            print(f"Service file left in place for inspection: "
+                  f"{service.service_file_path()}", file=sys.stderr)
+        print("Run `chronicle doctor` to verify the current state.", file=sys.stderr)
         sys.exit(1)
 
-    if accepted:
-        print("Installed background daemon and set processing_mode=background.")
-    else:
-        # Manager rejected the job — roll mode back to foreground (BUG-16,
-        # Option B) so doctor doesn't report background intent with no running
-        # daemon and the SessionStart hook doesn't keep respawning a daemon
-        # that never starts. Leave the service file on disk for inspection.
-        set_processing_mode("foreground")
-        print("Service file written, but the service manager did NOT start the daemon cleanly.",
-              file=sys.stderr)
-        detail = service.last_service_error()
-        if detail:
-            print(f"Details: {detail}", file=sys.stderr)
-        print("Rolled processing_mode back to foreground; run `chronicle doctor` for details.",
-              file=sys.stderr)
+    print("Installed background daemon and set processing_mode=background.")
     print()
     if sys.platform == "darwin":
         print("macOS launchd service:")
@@ -225,9 +213,9 @@ def update_install():
 
     install.sh already handles: platform detection, asset download, checksum
     verification, symlink placement, macOS quarantine cleanup, hook config,
-    and daemon restart (via launchctl kickstart / systemctl restart). Rather
-    than duplicate all of that here, we pipe it back through bash — one
-    source of truth for install and update.
+    and daemon restart (via launchctl bootout/bootstrap or systemctl start).
+    Rather than duplicate all of that here, we pipe it back through bash —
+    one source of truth for install and update.
     """
     rc = _run_remote_install_script(_installer_url())
     sys.exit(rc)
@@ -275,7 +263,6 @@ def uninstall_install():
 
     home_dir = chronicle_dir()
     runtime_dir = home_dir / "runtime"
-    legacy_src_dir = home_dir / "src"
     bin_dir = Path.home() / ".local" / "bin"
     settings_file = Path.home() / ".claude" / "settings.json"
 
@@ -304,7 +291,7 @@ def uninstall_install():
 
     # Build two separate plans so the output can say "Uninstalled" vs "Purged"
     # correctly instead of muddling everything into one list.
-    plan_integration: list[str] = []   # service, hooks, symlinks, runtime, legacy src
+    plan_integration: list[str] = []   # service, hooks, symlinks, runtime
     plan_data: list[str] = []          # home_dir purge (only with --purge)
     plan_preserved: list[str] = []     # shown only when integration exists and NOT purging
     plan_warn: list[str] = []
@@ -344,16 +331,13 @@ def uninstall_install():
     if runtime_dir.exists():
         plan_integration.append(f"{runtime_dir}/")
 
-    if legacy_src_dir.exists():
-        plan_integration.append(f"{legacy_src_dir}/ (legacy pre-v0.8.0 source install)")
-
     if args.purge and home_dir.exists():
         plan_data.append(f"{home_dir}/ (events.jsonl, config, logs, markers)")
     elif plan_integration and home_dir.exists():
         # Only meaningful to show "preserved" if we're actually uninstalling
         # something. If there's nothing to uninstall, preservation is noise.
         for name in ("events.jsonl", "config.json", ".processed", ".failed",
-                     "projects", "daemon.log", "hook-errors.log", "install-errors.log"):
+                     "projects", "daemon.log", "hook-errors.log"):
             p = home_dir / name
             if p.exists():
                 plan_preserved.append(str(p))
@@ -465,9 +449,6 @@ def uninstall_install():
                 integration_done.append(f"{link} removed")
         except OSError as e:
             print(f"WARN: could not remove {link}: {e}", file=sys.stderr)
-
-    if legacy_src_dir.exists():
-        _rmtree_checked(legacy_src_dir, f"{legacy_src_dir}/ removed", integration_done)
 
     # Runtime removal is the LAST non-purge step. Every chronicle.* module
     # we might still need has already been imported above; do not call into

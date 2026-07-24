@@ -120,7 +120,7 @@ echo "Extracting..."
 tar -xzf chronicle.tar.gz
 
 # -----------------------------------------------------------------------------
-# 5. Clean up legacy install layouts
+# 5. Stop the running daemon before swapping the binary
 # -----------------------------------------------------------------------------
 # Stop the daemon before replacing the binary. Use the SERVICE MANAGER, not a
 # raw `kill` (BUG-11): launchd KeepAlive=true would respawn a kill'd daemon
@@ -151,14 +151,6 @@ elif [ -f "$CHRONICLE_HOME/daemon.pid" ]; then
     fi
 fi
 
-# Remove the old source-tree install (venv + shell wrappers + git clone).
-# The binary doesn't need any of it. Keep user data under $CHRONICLE_HOME,
-# just nuke the managed src dir if it's there.
-if [ -d "$CHRONICLE_HOME/src" ]; then
-    echo "Removing legacy source-tree install at $CHRONICLE_HOME/src..."
-    rm -rf "$CHRONICLE_HOME/src"
-fi
-
 # -----------------------------------------------------------------------------
 # 6. Validate the new runtime before swapping it live
 # -----------------------------------------------------------------------------
@@ -176,7 +168,12 @@ fi
 
 echo "Validating hook installation..."
 mkdir -p "$HOME/.claude"
-"$NEW_RUNTIME/chronicle" install-hooks "$SETTINGS_FILE"
+# Hooks are configured BEFORE the symlink below exists, so tell chronicle the
+# path we are about to create instead of making it guess. Claude Code spawns
+# hook commands in exec form (no shell, no PATH fallback), so this must be the
+# exact final path.
+CHRONICLE_HOOK_PATH="$BIN_DIR/chronicle-hook" \
+    "$NEW_RUNTIME/chronicle" install-hooks "$SETTINGS_FILE"
 
 # -----------------------------------------------------------------------------
 # 7. Install runtime + symlinks
@@ -191,7 +188,8 @@ fi
 mv "$NEW_RUNTIME" "$RUNTIME_DIR"
 rm -rf "$CHRONICLE_HOME/runtime.old"
 
-# Old symlinks / wrapper scripts from earlier layouts.
+# Clear whatever is there first: ln -sf follows an existing symlink-to-directory
+# instead of replacing it.
 rm -f "$BIN_DIR/chronicle" "$BIN_DIR/chronicle-hook"
 # Main command points at the active runtime; hook command is a local relative
 # symlink to the same binary.
@@ -225,6 +223,7 @@ chmod 700 "$CHRONICLE_HOME" 2>/dev/null || true
 EFFECTIVE_MODE=$("$BIN_DIR/chronicle" doctor 2>/dev/null | awk '/^mode:/ {print $2}' || true)
 [ -z "$EFFECTIVE_MODE" ] && EFFECTIVE_MODE="foreground"
 
+DAEMON_RESTART_FAILED=0
 if [ "$EFFECTIVE_MODE" = "background" ]; then
     if [ "$OS" = "Darwin" ]; then
         PLIST="$HOME/Library/LaunchAgents/com.chronicle.daemon.plist"
@@ -235,7 +234,7 @@ if [ "$EFFECTIVE_MODE" = "background" ]; then
             if launchctl bootstrap "gui/$(id -u)" "$PLIST" >/dev/null 2>&1; then
                 echo "Reloaded launchd daemon (new binary active)."
             else
-                echo "  (launchd reload failed; run: chronicle install-daemon)"
+                DAEMON_RESTART_FAILED=1
             fi
         fi
     elif [ "$OS" = "Linux" ]; then
@@ -244,7 +243,23 @@ if [ "$EFFECTIVE_MODE" = "background" ]; then
         if systemctl --user start chronicle-daemon.service >/dev/null 2>&1; then
             echo "Started systemd daemon (new binary active)."
         else
-            echo "  (systemctl start failed; run: chronicle install-daemon)"
+            DAEMON_RESTART_FAILED=1
+        fi
+    fi
+
+    # Do not print "Installation complete!" over a background mode with no
+    # running daemon. Re-run install-daemon, which rewrites the service file,
+    # exits non-zero on rejection, and rolls the mode back to foreground.
+    if [ "$DAEMON_RESTART_FAILED" = "1" ]; then
+        echo "Daemon restart failed; re-running chronicle install-daemon..." >&2
+        if "$BIN_DIR/chronicle" install-daemon >/dev/null 2>&1; then
+            echo "Recovered: background daemon reinstalled."
+            DAEMON_RESTART_FAILED=0
+        else
+            echo "ERROR: could not start the background daemon." >&2
+            echo "       Chronicle has been rolled back to foreground mode." >&2
+            echo "       Run 'chronicle doctor' for details." >&2
+            EFFECTIVE_MODE="foreground"
         fi
     fi
 fi

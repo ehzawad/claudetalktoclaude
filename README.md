@@ -8,7 +8,9 @@ Records the *reasoning* behind your coding sessions — planning discussions, tr
 
 ## Quick start
 
-**Prerequisites:** macOS (Apple Silicon) or Linux (x86_64) · Claude Code CLI · Claude subscription (Pro / Max / Teams).
+**Prerequisites:** macOS (Apple Silicon) or Linux (x86_64) · Claude Code CLI **2.1.205 or newer** · Claude subscription (Pro / Max / Teams).
+
+> The version floor comes from `--json-schema` (min-version 2.1.205), which Chronicle uses for structured session summaries; `--safe-mode` needs only 2.1.169.
 
 Chronicle ships as a prebuilt self-contained binary. No Python, venv, or system package dependencies on the target machine.
 
@@ -62,10 +64,7 @@ flowchart TB
     DL --> VERIFY{"SHA256 match?"}
     VERIFY -->|no| ABORT([abort — no files touched])
     VERIFY -->|yes| STOPD["if daemon running,<br/>launchctl bootout /<br/>systemctl stop<br/>(fallback SIGTERM only<br/>for unmanaged daemon)"]
-    STOPD --> LEGACY{"legacy<br/>~/.chronicle/src ?"}
-    LEGACY -->|yes| WIPE["rm -rf legacy<br/>source-tree install<br/>(pre-v0.8.0)"]
-    LEGACY -->|no| QUAR
-    WIPE --> QUAR["macOS: xattr -dr<br/>com.apple.quarantine<br/>(skip Gatekeeper kill)"]
+    STOPD --> QUAR["macOS: xattr -dr<br/>com.apple.quarantine<br/>(skip Gatekeeper kill)"]
     QUAR --> HOOKS["validate new runtime:<br/>chronicle install-hooks<br/>(merge into ~/.claude/settings.json)"]
     HOOKS --> SWAP["atomic swap:<br/>runtime.new &rarr; runtime<br/>runtime &rarr; runtime.old &rarr; rm"]
     SWAP --> LINK["symlink<br/>~/.local/bin/chronicle{,-hook}<br/>&rarr; runtime/chronicle"]
@@ -155,7 +154,6 @@ folder basename.
 
 ```bash
 chronicle process --workers 5                  # pending sessions
-chronicle batch --workers 5                    # alias for process
 chronicle process --project NAME               # match by basename or slug substring
 chronicle process --force --workers 5          # reprocess successes
 chronicle process --retry-failed --workers 5   # retry terminal failures
@@ -212,6 +210,19 @@ chronicle --version
 ## Hook dispatch
 
 The configured Claude Code hook events (`SessionStart`, `UserPromptSubmit`, `Stop`, and `SessionEnd`) fire `chronicle-hook` (the same binary, dispatched by `argv[0]` via `_entrypoint.py`). Every configured event appends a line to `events.jsonl`; only `SessionStart` does anything extra.
+
+Entries are installed in Claude Code's **exec form** — `args` is present, so `command` is spawned directly with no `sh -c` layer:
+
+```json
+{ "type": "command", "command": "/Users/you/.local/bin/chronicle-hook", "args": [] }
+```
+
+> **Upgrading from v0.12.3 or earlier — one manual step.** Those releases wrote a shell-form entry (`{"type": "command", "command": "chronicle-hook"}`, no `args`). Chronicle no longer recognizes that shape, so upgrading leaves it in `~/.claude/settings.json` *and* adds the exec-form entry above. Until you delete the old entry by hand, `chronicle-hook` runs **twice per event**, and `chronicle uninstall` will not remove it. Open `~/.claude/settings.json` and delete every hook entry that has no `args` key and whose `command` ends in `chronicle-hook` — it may be the bare name, or an absolute path you edited in yourself. `chronicle doctor` counts only exec-form entries and will not flag the duplicate.
+
+Two consequences worth knowing:
+
+- **The path must be absolute and correct.** Exec form has no shell and therefore no PATH fallback, so a wrong path is a silently dead hook rather than a visible error. `install.sh` passes the path it is about to create via `$CHRONICLE_HOOK_PATH`; a standalone `chronicle install-hooks` resolves the real `chronicle-hook` (frozen-binary sibling → `PATH` → `~/.local/bin`) and warns if the result does not exist. This is what makes hooks work when Claude Code is launched from the macOS GUI or an IDE rather than a terminal, where a bare `chronicle-hook` would not be on the inherited PATH.
+- **`matcher` is omitted**, which the hooks reference defines as "match all" — correct for lifecycle events that should always fire.
 
 ```mermaid
 flowchart TB
@@ -283,7 +294,7 @@ flowchart TB
     subgraph pipeline["claude_cli.spawn_claude"]
         RESOLVE["resolve claude binary<br/>(shutil.which + fallback dirs)"]
         ENV["strip ANTHROPIC_API_KEY /<br/>AUTH_TOKEN / BASE_URL"]
-        SPAWN["claude -p --output-format json<br/>--no-session-persistence<br/>(--json-schema for session summaries;<br/>model/effort/fallback unset unless configured;<br/>no timeout)"]
+        SPAWN["claude --safe-mode -p --tools ''<br/>--output-format json<br/>--no-session-persistence<br/>(--json-schema for session summaries;<br/>model/effort/fallback unset unless configured;<br/>no timeout)"]
         CLASSIFY["classify result:<br/>INFRA / TRANSIENT / PARSE /<br/>CONTEXT / STRUCTURED_OUTPUT"]
     end
 
@@ -496,6 +507,7 @@ The only compact-by-design surface is the per-project `chronicle.md` **timeline 
 - **Secret redaction.** User/assistant prose, tool commands, selected tool inputs, tool outputs, and summarization error messages pass through a pattern scanner before any markdown or marker detail is written. API keys (`sk-`, `ghp_`, `AKIA`, `xoxb-`), auth headers (`Bearer …`), private keys (`-----BEGIN …`), JWTs (`eyJ…`), connection URIs (`postgres://user:pass@…`), and env-var assignments (`API_KEY=…`, `SECRET=…`) are replaced with `[REDACTED]`. `.env`, `.pem`, and `.key` file content is fully redacted.
 - **Subscription routing.** Every `claude -p` subprocess call strips `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_BASE_URL` from the environment — summarization always routes through your Claude.ai subscription, never API credits or a proxy gateway ([anthropics/claude-code#2051](https://github.com/anthropics/claude-code/issues/2051)).
 - **File permissions.** `~/.chronicle/` is `0700` (owner-only), matching `~/.claude/`.
+- **Isolated summarization.** Every `claude -p` Chronicle spawns runs with `--safe-mode` and `--tools ""`. Safe mode disables all customizations — your `CLAUDE.md`, skills, plugins, hooks, MCP servers, custom agents, and output styles — while auth, model selection, and permissions work normally (this is why `--safe-mode` is used rather than `--bare`, which skips OAuth/keychain and demands API credentials). Two things follow. First, **Chronicle's own hooks no longer fire inside Chronicle's own subprocess**: without safe mode each summarization triggered `chronicle-hook` four times, writing junk events into `events.jsonl` and injecting the wrong project's session titles into the summarizer's prompt. Second, **your customizations do not shape Chronicle's output** — if you previously relied on `CLAUDE.md` or an output style to steer `story.md` or `insight.html`, that influence is gone by design. Disabling built-in tools also means a prompt injection carried inside a transcript has no file or command access to reach for. Note this is isolation, not determinism: model sampling and Claude Code's own defaults still vary.
 - **Observer-only at runtime.** Chronicle never writes to `~/.claude/projects/` (the session transcripts), never blocks a hook, never modifies Claude Code behavior. The only effect on an active session is the `additionalContext` injection of past session titles on SessionStart. All deletion operations (`rewind --delete`, `--prune`) only touch chronicle's own markdown and markers — the original JSONL in `~/.claude/projects/` stays. Install / uninstall are the one exception: `install-hooks` and `uninstall` do edit `~/.claude/settings.json` to add or remove the `chronicle-hook` entries, and they preserve any unrelated hook entries already there.
 
 ---

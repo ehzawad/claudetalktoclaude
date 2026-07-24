@@ -253,7 +253,7 @@ class TestBatchWriteMarkerGuard:
             is_error = False
 
         async def fake_one(event, _config, _semaphore):
-            return (Digest(event["sid"]), Entry())
+            return (Digest(event["sid"]), Entry(), None)
 
         attempted = []
 

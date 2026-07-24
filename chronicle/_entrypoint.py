@@ -2,8 +2,10 @@
 
 The frozen binary is shipped as `chronicle` and symlinked to `chronicle-hook`
 at install time (busybox pattern). sys.argv[0] basename picks which command
-to run, so a single ~10MB binary replaces the two venv console scripts AND
-the self-healing shell wrappers.
+to run.
+
+Unix-only by design: macOS (Apple Silicon) and Linux (x86_64) are the
+supported targets, so there is no Windows suffix handling here.
 """
 
 import os
@@ -13,11 +15,6 @@ import sys
 def main():
     os.umask(0o077)  # owner-only perms for everything chronicle writes (BUG-25)
     prog = os.path.basename(sys.argv[0]).lower()
-    # Normalize Windows-style suffixes if this entry point is ever built there.
-    for suffix in (".exe",):
-        if prog.endswith(suffix):
-            prog = prog[: -len(suffix)]
-
     if prog == "chronicle-hook":
         from chronicle.hook import main as hook_main
         raise SystemExit(hook_main())

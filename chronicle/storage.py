@@ -207,10 +207,10 @@ def delete_session(session_path, slug: str):
     # Find the real (UNFENCED) '<!-- session:UUID -->' marker — a fenced
     # `cat chronicle.md` lookalike must not be picked, or _remove_session_entry
     # would no-op and leave a stale entry after the session file is deleted.
+    session_marker = None
     if chronicle_file.exists():
         chronicle = chronicle_file.read_text()
         spans = _fenced_spans(chronicle)
-        session_marker = None
         for m in re.finditer(rf"<!-- session:{re.escape(short_id)}[a-f0-9-]* -->", chronicle):
             if not any(s <= m.start() < e for s, e in spans):
                 session_marker = m.group(0)
@@ -218,6 +218,15 @@ def delete_session(session_path, slug: str):
         if session_marker:
             chronicle = _remove_session_entry(chronicle, session_marker)
             _atomic_write(chronicle_file, chronicle)
+
+    # The chronicle.md marker carries the FULL session UUID; the session
+    # filename only carries the 8-char short id. Markers may be keyed by
+    # either, so recover the full id where we can and clear both.
+    full_id = short_id
+    if session_marker:
+        full_match = re.search(r"<!-- session:([a-f0-9-]+) -->", session_marker)
+        if full_match:
+            full_id = full_match.group(1)
 
     # Remove session .md file
     session_path.unlink()
@@ -487,7 +496,7 @@ def rebuild_prompts_section(slug: str):
     for ts, session_title, num, text in all_prompts:
         if session_title != current_session:
             current_session = session_title
-            # Neutralize markers the title may carry (e.g. a legacy/hand-edited
+            # Neutralize markers the title may carry (e.g. a hand-edited
             # session H1 like '# Fix <!-- prompts --> X') so the EOF block can't
             # reintroduce a raw structural marker that the next rebuild mistargets.
             safe_title = session_title.replace("<!--", "&lt;!--").replace("\n", " ")
@@ -561,30 +570,6 @@ def _splice_detail(existing: str, detail_section: str) -> str:
     return existing[:ins] + "\n" + detail_section.rstrip("\n") + "\n" + existing[ins:]
 
 
-def _repair_chronicle_header(content: str, slug: str, project_path: str | None) -> str:
-    """Backfill an existing chronicle.md H1 to the correct display name.
-
-    Chronicles written before the display-name fix used
-    `# Chronicle: <slug.rsplit('-',1)[-1]>`, which dropped everything before the
-    last dash ('codex-council' -> 'council'). Repair that title in place, but
-    ONLY when the first line is still exactly that auto-generated lossy value —
-    never stomp a header a human has edited. Idempotent: once rewritten to the
-    correct name it no longer equals the lossy value, so repeated appends leave
-    it untouched.
-    """
-    if not content.startswith("# Chronicle: "):
-        return content
-    end = content.find("\n")
-    if end == -1:
-        return content
-    current = content[len("# Chronicle: "):end].strip()
-    old_lossy = slug.rsplit("-", 1)[-1] if "-" in slug else slug
-    correct = project_display_name(slug, project_path)
-    if current == old_lossy and current != correct:
-        return f"# Chronicle: {correct}\n" + content[end + 1:]
-    return content
-
-
 def append_to_chronicle(entry, slug: str):
     """Append to chronicle.md: insert a timeline table row + a detail section."""
     ensure_dirs(slug)
@@ -609,10 +594,6 @@ def append_to_chronicle(entry, slug: str):
 
     if chronicle_file.exists():
         existing = chronicle_file.read_text()
-        # Opportunistically fix a stale lossy H1 ('council' -> 'codex-council')
-        # on this append. Propagates through both the normal and retrofit paths
-        # below since both derive their header from `existing`.
-        existing = _repair_chronicle_header(existing, slug, getattr(entry, "project_path", None))
         # If session already exists, remove old entry so we can replace it
         if session_marker in existing:
             existing = _remove_session_entry(existing, session_marker)
@@ -644,76 +625,50 @@ def append_to_chronicle(entry, slug: str):
             # rebuild_prompts_section() can't truncate it (see _splice_detail).
             _atomic_write(chronicle_file, _splice_detail(existing, detail_section))
         else:
-            # Old-format chronicle.md — retrofit a timeline table at the top
-            _retrofit_timeline(chronicle_file, existing)
-            # Re-read and insert normally
-            existing = chronicle_file.read_text()
-            sep_idx = existing.index(_TIMELINE_SEP)
-            after_sep = existing.index("\n", sep_idx) + 1
-            existing = existing[:after_sep] + table_row + "\n" + existing[after_sep:]
+            # No unfenced end marker: the timeline block was damaged by a hand
+            # edit. Two shapes to repair, and neither may drop existing rows.
+            tl_pos = _unfenced_index(existing, _TIMELINE_HEADER)
+            sep_pos = (_unfenced_index(existing, _TIMELINE_SEP, tl_pos)
+                       if tl_pos != -1 else -1)
+            if sep_pos != -1:
+                # The table survived, only the end marker is gone. Add the new
+                # row under the separator and close the block after the last
+                # contiguous "|" row — rebuilding wholesale here would leave the
+                # orphaned header behind and emit a doubled table.
+                after_sep = existing.index("\n", sep_pos) + 1
+                rest = existing[after_sep:]
+                lines = rest.split("\n")
+                n_rows = 0
+                while n_rows < len(lines) and lines[n_rows].startswith("|"):
+                    n_rows += 1
+                rebuilt = ("\n".join(lines[:n_rows] + [table_row, _TIMELINE_END])
+                           + "\n" + "\n".join(lines[n_rows:]))
+                existing = existing[:after_sep] + rebuilt
+                if _DETAIL_START not in existing:
+                    existing = existing.replace(
+                        _TIMELINE_END, f"{_TIMELINE_END}\n\n{_DETAIL_START}\n", 1)
+            else:
+                # Whole block gone. Rebuild directly under the H1 — same shape
+                # the new-file path writes below. find() (not index(), which
+                # raises) so a file with no "# " heading repairs rather than
+                # crashing the append.
+                hdr_pos = existing.find("# ")
+                if hdr_pos == -1:
+                    header_end = 0
+                else:
+                    nl = existing.find("\n", hdr_pos)
+                    header_end = (nl + 1) if nl != -1 else len(existing)
+                header = existing[:header_end]
+                body = existing[header_end:].lstrip("\n")
+                timeline = (f"\n{_TIMELINE_HEADER}\n{_TIMELINE_SEP}\n{table_row}\n"
+                            f"{_TIMELINE_END}\n\n{_DETAIL_START}\n\n")
+                existing = header + timeline + body
             _atomic_write(chronicle_file, _splice_detail(existing, detail_section))
     else:
         project_name = project_display_name(slug, getattr(entry, "project_path", None))
         header = f"# Chronicle: {project_name}\n\n"
         timeline = f"{_TIMELINE_HEADER}\n{_TIMELINE_SEP}\n{table_row}\n{_TIMELINE_END}\n\n{_DETAIL_START}\n\n"
         _atomic_write(chronicle_file, header + timeline + detail_section)
-
-
-def _retrofit_timeline(chronicle_file, existing: str):
-    """Add a timeline table to an existing old-format chronicle.md."""
-    rows = []
-    # Find all existing ## sections and extract their data
-    for match in re.finditer(
-        r"^## (.+?) \| (.+)\n<!-- session:([a-f0-9-]+) -->",
-        existing, re.MULTILINE
-    ):
-        ts, section_title, session_id = match.group(1), match.group(2), match.group(3)
-        # Count decisions (bullet points starting with "- **")
-        # Find the section boundary (next ## or end of string)
-        start = match.end()
-        next_section = re.search(r"^## ", existing[start:], re.MULTILINE)
-        section_text = existing[start:start + next_section.start()] if next_section else existing[start:]
-        n_decisions = len(re.findall(r"^- \*\*", section_text, re.MULTILINE))
-
-        # Find session file link
-        sf_match = re.search(r"\[sessions/(.+?\.md)\]", section_text)
-        sf = sf_match.group(1) if sf_match else ""
-
-        # Extract summary (first paragraph after the marker)
-        summary_match = re.search(r"\n\n(.+?)(?:\n\n|\Z)", section_text, re.DOTALL)
-        summary = ""
-        if summary_match:
-            summary = summary_match.group(1).strip()[:100].replace("\n", " ").replace("|", "/")
-            if len(summary_match.group(1).strip()) > 100:
-                summary += "..."
-
-        title = section_title.strip()
-        if len(title) > 60:
-            title = title[:57] + "..."
-        if sf:
-            row = f"| {ts} | [{title}](sessions/{sf}) | {n_decisions} | {summary} |"
-        else:
-            row = f"| {ts} | {title} | {n_decisions} | {summary} |"
-        rows.append(row)
-
-    # Find where the header ends (after "# Chronicle: ..." line). Use find()
-    # (not index(), which raises) so a malformed old chronicle.md — no "# "
-    # heading, or a single "# Chronicle: x" line with no trailing newline —
-    # retrofits cleanly instead of crashing the whole append.
-    hdr_pos = existing.find("# ")
-    if hdr_pos == -1:
-        header_end = 0
-    else:
-        nl = existing.find("\n", hdr_pos)
-        header_end = (nl + 1) if nl != -1 else len(existing)
-    header = existing[:header_end]
-    body = existing[header_end:].lstrip("\n")
-
-    timeline = f"\n{_TIMELINE_HEADER}\n{_TIMELINE_SEP}\n"
-    timeline += "\n".join(rows) + "\n"
-    timeline += f"{_TIMELINE_END}\n\n{_DETAIL_START}\n\n"
-
-    _atomic_write(chronicle_file, header + timeline + body)
 
 
 def write_chronicle(entry, digest, max_retries: int | None = 3):

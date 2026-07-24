@@ -1,13 +1,20 @@
 """Central Claude CLI subprocess management.
 
-Solves three cross-cutting concerns:
+Solves four cross-cutting concerns:
 
 1. PATH resolution — finds the `claude` binary even when the daemon runs
    under launchd's minimal PATH. Uses shutil.which + fallback directories.
 2. Subprocess env — strips auth/endpoint env vars so subscription routing
    always wins over API-key or proxy-gateway routing
    (anthropics/claude-code#2051).
-3. Error classification — distinguishes INFRA (missing binary, perm
+3. Invocation isolation — `--safe-mode` keeps a programmatic summary from
+   loading the user's hooks, CLAUDE.md, plugins, skills, MCP servers, or other
+   customizations (notably Chronicle's OWN hooks, which would otherwise fire
+   four times per summarization and write junk into events.jsonl). `--tools ""`
+   disables built-in tools because every prompt Chronicle sends is
+   self-contained — the transcript arrives on stdin — so a prompt injection
+   carried in a transcript has nothing to reach for.
+4. Error classification — distinguishes INFRA (missing binary, perm
    denied, auth failure), TRANSIENT/PARSE retriable failures, and
    deterministic CONTEXT/STRUCTURED_OUTPUT terminal failures. Retry
    accounting only penalizes non-INFRA.
@@ -40,6 +47,7 @@ _STRIP_ENV_VARS = frozenset({
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
 })
+
 
 
 def _fallback_bin_dirs() -> list[Path]:
@@ -248,7 +256,12 @@ async def spawn_claude(
     json_schema: Optional[dict] = None,
     timeout: Optional[float] = None,
 ) -> ClaudeResult:
-    """Invoke `claude -p` and return a classified result.
+    """Invoke an isolated `claude -p` and return a classified result.
+
+    `--safe-mode` disables user/project customizations (including Chronicle's
+    own hooks) and `--tools ""` disables built-in tools. Authentication, model
+    selection, and permissions are unaffected — that is why safe mode is used
+    rather than `--bare`, which skips OAuth/keychain and demands API creds.
 
     No wall-clock limit by default (timeout=None): the call runs until claude
     exits or the awaiting task is cancelled. Ctrl-C (asyncio.run) and daemon
@@ -278,7 +291,10 @@ async def spawn_claude(
         )
 
     args = [
-        str(claude_bin), "-p",
+        str(claude_bin),
+        "--safe-mode",
+        "-p",
+        "--tools", "",
         "--output-format", "json",
         "--no-session-persistence",
     ]

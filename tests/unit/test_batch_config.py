@@ -67,7 +67,7 @@ async def test_batch_passes_config_max_retries_to_write_chronicle(
         "skip_projects": [],
     }
     import json as j
-    config.CONFIG_FILE.write_text(j.dumps(custom))
+    config.config_file().write_text(j.dumps(custom))
 
     # Stub find_all_sessions → one jsonl; extract_session → fake digest;
     # async_summarize_session → success entry.

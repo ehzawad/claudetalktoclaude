@@ -94,7 +94,8 @@ def _make_installed_footprint(home: Path) -> Path:
     (home / ".chronicle" / "runtime").mkdir(parents=True, exist_ok=True)
     settings = home / ".claude" / "settings.json"
     settings.write_text(json.dumps({"hooks": {"SessionStart": [
-        {"matcher": "", "hooks": [{"type": "command", "command": "chronicle-hook"}]}]}}))
+        {"matcher": "", "hooks": [
+            {"type": "command", "command": "chronicle-hook", "args": []}]}]}}))
     return chron
 
 
@@ -213,11 +214,13 @@ class TestProcess:
         r = _run(["process", "--workers", "0"], home=home, bin_dir=bin_dir, timeout=30)
         assert r.returncode == 0  # floored to 1, completes
 
-    def test_batch_alias(self, cli):
+    def test_batch_alias_is_removed(self, cli):
+        """`batch` was a compatibility alias for `process`; it is gone."""
         home, bin_dir, _ = cli
         _seed_jsonl(home / ".claude" / "projects", "-tmp-batch", str(uuid.uuid4()))
         r = _run(["batch", "--dry-run"], home=home, bin_dir=bin_dir)
-        assert r.returncode == 0 and "DRY RUN" in r.stdout
+        assert r.returncode == 1
+        assert "Unknown command: batch" in r.stdout
 
 
 # ---------------- query ----------------

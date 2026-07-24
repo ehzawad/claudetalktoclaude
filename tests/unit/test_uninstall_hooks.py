@@ -35,7 +35,7 @@ def test_uninstall_removes_only_chronicle_entries(tmp_path):
             "SessionStart": [{
                 "matcher": "",
                 "hooks": [
-                    {"type": "command", "command": "chronicle-hook"},
+                    {"type": "command", "command": "chronicle-hook", "args": []},
                     {"type": "command", "command": "my-custom-logger"},
                 ],
             }],
@@ -62,7 +62,7 @@ def test_uninstall_drops_empty_matcher_groups(tmp_path):
     data = {
         "hooks": {
             "SessionStart": [
-                {"matcher": "", "hooks": [{"type": "command", "command": "chronicle-hook"}]},
+                {"matcher": "", "hooks": [{"type": "command", "command": "chronicle-hook", "args": []}]},
                 {"matcher": "other", "hooks": [{"type": "command", "command": "user-hook"}]},
             ],
         },
@@ -85,10 +85,12 @@ def test_uninstall_drops_empty_events(tmp_path):
         "theme": "dark",
         "hooks": {
             "SessionStart": [
-                {"matcher": "", "hooks": [{"command": "chronicle-hook"}]},
+                {"matcher": "", "hooks": [
+                    {"type": "command", "command": "chronicle-hook", "args": []}]},
             ],
             "Stop": [
-                {"matcher": "", "hooks": [{"command": "chronicle-hook", "async": True}]},
+                {"matcher": "", "hooks": [
+                    {"type": "command", "command": "chronicle-hook", "args": [], "async": True}]},
             ],
         },
     }
@@ -101,8 +103,8 @@ def test_uninstall_drops_empty_events(tmp_path):
     assert result.get("theme") == "dark"
 
 
-def test_uninstall_matches_absolute_path_commands(tmp_path):
-    """chronicle-hook can be invoked by absolute path (e.g. /Users/x/.local/bin/chronicle-hook)."""
+def test_uninstall_matches_exec_form_absolute_paths(tmp_path):
+    """chronicle-hook is normally installed by absolute path (e.g. /Users/x/.local/bin/chronicle-hook)."""
     from chronicle.install_hooks import uninstall_hooks
     settings = tmp_path / "settings.json"
     data = {
@@ -110,7 +112,8 @@ def test_uninstall_matches_absolute_path_commands(tmp_path):
             "SessionStart": [{
                 "matcher": "",
                 "hooks": [
-                    {"command": "/Users/ehz/.local/bin/chronicle-hook"},
+                    {"type": "command",
+                     "command": "/Users/ehz/.local/bin/chronicle-hook", "args": []},
                     {"command": "/usr/local/bin/other-tool"},
                 ],
             }],
@@ -126,12 +129,13 @@ def test_uninstall_matches_absolute_path_commands(tmp_path):
 
 
 def test_uninstall_matches_command_with_flags(tmp_path):
-    """'chronicle-hook --something' still resolves to chronicle-hook basename."""
+    """`args` contents are irrelevant — presence alone selects exec form."""
     from chronicle.install_hooks import uninstall_hooks
     settings = tmp_path / "settings.json"
     data = {
         "hooks": {
-            "Stop": [{"matcher": "", "hooks": [{"command": "chronicle-hook --verbose"}]}],
+            "Stop": [{"matcher": "", "hooks": [
+                {"type": "command", "command": "chronicle-hook", "args": ["--verbose"]}]}],
         },
     }
     settings.write_text(json.dumps(data))
@@ -143,7 +147,8 @@ def test_uninstall_dry_run_does_not_write(tmp_path):
     settings = tmp_path / "settings.json"
     data = {
         "hooks": {
-            "SessionStart": [{"matcher": "", "hooks": [{"command": "chronicle-hook"}]}],
+            "SessionStart": [{"matcher": "", "hooks": [
+                {"type": "command", "command": "chronicle-hook", "args": []}]}],
         },
     }
     raw = json.dumps(data)
@@ -185,14 +190,42 @@ def test_uninstall_then_install_is_idempotent(tmp_path):
     assert json.loads(settings.read_text()) == state_after_install
 
 
-def test_is_chronicle_hook_command_variants():
-    from chronicle.install_hooks import _is_chronicle_hook_command as f
-    assert f("chronicle-hook") is True
-    assert f("/Users/ehz/.local/bin/chronicle-hook") is True
-    assert f("chronicle-hook --flag") is True
-    assert f("  chronicle-hook  ") is True
-    assert f("chronicle") is False  # the CLI, not the hook
-    assert f("fake-chronicle-hook") is False
-    assert f("") is False
+def test_is_chronicle_hook_entry_variants():
+    """Only exec form — an entry with an `args` key — is Chronicle's."""
+    from chronicle.install_hooks import _is_chronicle_hook_entry as f
+
+    def cmd(command, **extra):
+        return {"type": "command", "command": command, **extra}
+
+    # Exec form (what Chronicle writes today) — whole string is the executable.
+    assert f(cmd("/Users/ehz/.local/bin/chronicle-hook", args=[])) is True
+    assert f(cmd("/home/First Last/.local/bin/chronicle-hook", args=[])) is True
+    assert f(cmd("chronicle-hook", args=[])) is True
+    assert f(cmd("  chronicle-hook  ", args=[])) is True
+    assert f(cmd("chronicle-hook", args=["--verbose"])) is True
+
+    # No `args` key at all is not an entry Chronicle writes.
+    assert f(cmd("chronicle-hook")) is False
+    assert f(cmd("/Users/ehz/.local/bin/chronicle-hook")) is False
+    assert f({"command": "chronicle-hook"}) is False
+
+    # A missing `type` is tolerated — Claude Code defaults it to "command".
+    # Defensive parsing of hand-edited settings, not backwards compatibility:
+    # rejecting these would strand them in install, uninstall AND doctor.
+    assert f({"command": "chronicle-hook", "args": []}) is True
+    assert f({"command": "/Users/ehz/.local/bin/chronicle-hook", "args": []}) is True
+
+    # `command` is one whole executable path, never shell-tokenized.
+    assert f(cmd("chronicle-hook --flag", args=[])) is False
+    # An unrelated command that merely MENTIONS the name is not ours.
+    assert f(cmd("my-tool --config /opt/chronicle-hook")) is False
+    assert f(cmd("echo done >> /var/log/chronicle-hook")) is False
+    assert f(cmd("chronicle", args=[])) is False  # the CLI, not the hook
+    assert f(cmd("fake-chronicle-hook", args=[])) is False
+
+    # Malformed / non-command entries.
+    assert f(cmd("", args=[])) is False
+    assert f(cmd(None, args=[])) is False
+    assert f(cmd(42, args=[])) is False
+    assert f({"type": "prompt", "command": "chronicle-hook", "args": []}) is False
     assert f(None) is False
-    assert f(42) is False

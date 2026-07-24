@@ -105,30 +105,3 @@ def test_recover_then_display_gives_basename(tmp_path):
     sessions.mkdir(parents=True)
     (sessions / "s.md").write_text("# S\n\n**Project**: /Users/x/codex-council\n")
     assert project_display_name(pdir.name, recover_project_path(pdir)) == "codex-council"
-
-
-# ---------- chronicle.md header backfill ----------
-
-def test_repair_header_fixes_lossy_and_is_idempotent():
-    from chronicle.storage import _repair_chronicle_header
-    slug = "-Users-x-codex-council"
-    content = "# Chronicle: council\n\nbody\n"            # old lossy header
-    out = _repair_chronicle_header(content, slug, "/Users/x/codex-council")
-    assert out.startswith("# Chronicle: codex-council\n")
-    assert "body" in out
-    # idempotent — second pass changes nothing
-    assert _repair_chronicle_header(out, slug, "/Users/x/codex-council") == out
-
-
-def test_repair_header_preserves_hand_edits():
-    from chronicle.storage import _repair_chronicle_header
-    slug = "-Users-x-codex-council"
-    content = "# Chronicle: My Cool Project\n\nbody\n"     # not the lossy value
-    assert _repair_chronicle_header(content, slug, "/Users/x/codex-council") == content
-
-
-def test_repair_header_noop_when_not_a_chronicle_header():
-    from chronicle.storage import _repair_chronicle_header
-    slug = "-Users-x-codex-council"
-    content = "# Something else\n\nbody\n"
-    assert _repair_chronicle_header(content, slug, "/Users/x/codex-council") == content

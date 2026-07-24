@@ -86,10 +86,10 @@ def timeline(limit: int = 20, project: str | None = None):
         if project and not project_name_matches(project, slug):
             continue
         content = session_file.read_text()
-        # Extract date — handles both "**Date**: X" and "**Date**: X |" formats
+        # Date from the metadata line (bounded by the next field separator).
         date_match = re.search(r"\*\*Date\*\*:\s*([^|\n]+)", content)
         date_str = date_match.group(1).strip() if date_match else "0000"
-        # Extract title — handles both "# Session: X" and "# <title>" formats
+        # Title is the H1.
         title_match = re.search(r"^# (.+)", content, re.MULTILINE)
         title = title_match.group(1).strip() if title_match else session_file.stem[:8]
         project_slug = session_file.parent.parent.name
@@ -105,7 +105,8 @@ def timeline(limit: int = 20, project: str | None = None):
     for date_str, proj, title, filepath, content in sessions[:limit]:
         # Extract decisions count (### headings under Key decisions)
         decision_count = len(re.findall(r"^### ", content, re.MULTILINE))
-        # Extract summary from the current or older section heading.
+        # Summary section, falling back to the narrative section for records
+        # that have a narrative but no summary.
         summary_match = re.search(r"## Summary\n\n(.+?)(?:\n\n|\Z)", content, re.DOTALL)
         if not summary_match:
             summary_match = re.search(r"## What happened\n\n(.+?)(?:\n\n|\Z)", content, re.DOTALL)
@@ -351,7 +352,10 @@ def main():
 
     sessions_p = subparsers.add_parser("sessions", help="Sessions for current project")
     sessions_p.add_argument("path", nargs="?", help="Project path or name (default: current dir)")
-    sessions_p.add_argument("--project", help="Project name (alias for the positional)")
+    sessions_p.add_argument(
+        "--project",
+        help="Project name (same as the positional; matches --project on the other subcommands)",
+    )
 
     subparsers.add_parser("projects", help="List chronicled projects")
 

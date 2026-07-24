@@ -653,12 +653,11 @@ def extract_session(jsonl_path: str) -> SessionDigest:
     return digest
 
 
-def digest_to_text(digest: SessionDigest, max_chars: int | None = None) -> str:
+def digest_to_text(digest: SessionDigest) -> str:
     """Format a digest as an interleaved timeline for the LLM prompt.
 
     One-liner tool indexes plus full redacted tool inputs; the whole timeline is
-    included. max_chars is retained only for call-site compatibility; Chronicle
-    ignores it and imposes no front/tail truncation. claude -p's 10 MiB stdin
+    included. There is no front/tail truncation — claude -p's 10 MiB stdin
     limit is the only ceiling.
     """
     parts = []
@@ -722,8 +721,6 @@ def digest_to_text(digest: SessionDigest, max_chars: int | None = None) -> str:
 
     timeline_text = "\n".join(timeline_parts)
 
-    # max_chars is deliberately ignored: Chronicle must not impose its own
-    # transcript truncation before claude -p's stdin limit.
     parts.append(timeline_text)
     return "\n".join(parts)
 

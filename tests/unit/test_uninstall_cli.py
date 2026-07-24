@@ -134,7 +134,7 @@ def test_uninstall_with_hooks_only_strips_hooks(fake_home, monkeypatch, capsys):
         "hooks": {
             "SessionStart": [{
                 "matcher": "",
-                "hooks": [{"type": "command", "command": "chronicle-hook"}],
+                "hooks": [{"type": "command", "command": "chronicle-hook", "args": []}],
             }],
         },
     }))
@@ -156,7 +156,8 @@ def test_dry_run_purge_counts_leftover_data_in_plan_size(fake_home, monkeypatch,
     ch.mkdir()
     (ch / "events.jsonl").write_text('{}\n')
     (fake_home / ".claude" / "settings.json").write_text(json.dumps({
-        "hooks": {"Stop": [{"matcher": "", "hooks": [{"command": "chronicle-hook"}]}]},
+        "hooks": {"Stop": [{"matcher": "", "hooks": [
+            {"type": "command", "command": "chronicle-hook", "args": []}]}]},
     }))
 
     rc = _run(["uninstall", "--dry-run", "--purge"], monkeypatch)
@@ -193,7 +194,8 @@ def test_purge_confirmation_only_fires_if_there_is_data_to_purge(fake_home, monk
     import json
     # Hooks present (so integration plan is non-empty) but NO ~/.chronicle/.
     (fake_home / ".claude" / "settings.json").write_text(json.dumps({
-        "hooks": {"Stop": [{"matcher": "", "hooks": [{"command": "chronicle-hook"}]}]},
+        "hooks": {"Stop": [{"matcher": "", "hooks": [
+            {"type": "command", "command": "chronicle-hook", "args": []}]}]},
     }))
     # If confirmation fired, EOF on stdin would cause an abort (rc=1).
     monkeypatch.setattr("sys.stdin", io.StringIO(""))

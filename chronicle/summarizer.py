@@ -249,9 +249,10 @@ def _make_entry(digest: SessionDigest) -> ChronicleEntry:
 
 
 def _as_list(v):
-    """Coerce a structured_output field to a list. The --json-schema path is
-    validated by the CLI, but the _extract_structured fallback is not: a model
-    returning a bare string where a list is expected would otherwise be rendered
+    """Coerce a structured_output field to a list.
+
+    --json-schema validation is enforced by the CLI, but coerce defensively
+    anyway: a bare string where a list is expected would otherwise be rendered
     character-by-character. A scalar becomes a one-item list; None/'' -> []."""
     return v if isinstance(v, list) else ([] if v in (None, "") else [v])
 
@@ -263,7 +264,7 @@ def _as_dict(v):
 
 
 def _populate_entry_from_structured(data: dict, entry: ChronicleEntry) -> ChronicleEntry:
-    """Fill a ChronicleEntry from structured_output or parsed result JSON."""
+    """Fill a ChronicleEntry from the structured_output dict."""
     if data.get("is_empty"):
         entry.is_empty = True
         entry.title = data.get("title", f"Session {entry.session_id[:8]}")
@@ -299,8 +300,15 @@ def _populate_entry_from_structured(data: dict, entry: ChronicleEntry) -> Chroni
 def _extract_structured(outer: dict) -> dict | None:
     """Return the structured_output dict from the outer JSON wrapper, or None.
 
-    Falls back to parsing outer["result"] as JSON for CLI versions without
-    --json-schema support.
+    Falls back to parsing outer["result"] as a JSON object when
+    structured_output is absent. This is NOT backwards compatibility with an
+    older CLI — it is defensive parsing of CURRENT Claude Code behavior:
+    2.1.219 can exit 0 with is_error=false and no structured_output key at all
+    (measured across repeated --json-schema calls). When that happens because
+    the model emitted the JSON as ordinary assistant text instead of invoking
+    the structured-output tool, the payload is sitting in `result` and is
+    perfectly usable. Without this, a whole summarization is thrown away as a
+    parse failure.
     """
     data = outer.get("structured_output")
     if isinstance(data, dict):
@@ -310,9 +318,9 @@ def _extract_structured(outer: dict) -> dict | None:
         return None
     try:
         loaded = json.loads(raw_text)
-        return loaded if isinstance(loaded, dict) else None
     except (ValueError, TypeError):
         return None
+    return loaded if isinstance(loaded, dict) else None
 
 
 async def async_summarize_session(digest: SessionDigest) -> ChronicleEntry:
@@ -380,7 +388,7 @@ async def async_summarize_session(digest: SessionDigest) -> ChronicleEntry:
             return entry
         entry.is_error = True
         entry.error_kind = ErrorKind.PARSE.value
-        entry.error_message = "structured_output missing and result not JSON"
+        entry.error_message = "structured_output missing and result not a JSON object"
         return entry
 
     return _populate_entry_from_structured(data, entry)

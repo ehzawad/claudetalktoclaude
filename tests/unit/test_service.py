@@ -107,7 +107,12 @@ def test_chronicle_binary_raises_when_missing(tmp_home, monkeypatch):
     assert "chronicle binary not found" in str(excinfo.value)
 
 
-def test_install_service_records_bootstrap_error(monkeypatch):
+def test_install_service_promotes_bootstrap_error(monkeypatch):
+    """A rejected job must raise, not return False.
+
+    Returning False let `chronicle install-daemon` finish with exit 0 while the
+    daemon was never started (see tests/unit/test_main_cli.py for the CLI side).
+    """
     import chronicle.service as service
 
     monkeypatch.setattr(service, "platform_key", lambda: "macos")
@@ -118,6 +123,7 @@ def test_install_service_records_bootstrap_error(monkeypatch):
 
     monkeypatch.setattr(service, "_mac_install", fake_mac_install)
 
-    accepted = service.install_service()
-    assert accepted is False
+    with pytest.raises(RuntimeError) as excinfo:
+        service.install_service()
+    assert "launchctl bootstrap failed: boom" in str(excinfo.value)
     assert service.last_service_error() == "launchctl bootstrap failed: boom"
