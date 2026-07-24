@@ -7,41 +7,49 @@ overwriting other keys. Also exposes uninstall_hooks() for the
 
 import json
 import os
+import shlex
 import sys
 from pathlib import Path
 
-CHRONICLE_HOOKS = {
-    "SessionStart": [
-        {
-            "matcher": "",
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": "chronicle-hook",
-                    "statusMessage": "Loading chronicle context...",
-                }
-            ],
-        }
-    ],
-    "Stop": [
-        {
-            "matcher": "",
-            "hooks": [{"type": "command", "command": "chronicle-hook", "async": True}],
-        }
-    ],
-    "UserPromptSubmit": [
-        {
-            "matcher": "",
-            "hooks": [{"type": "command", "command": "chronicle-hook", "async": True}],
-        }
-    ],
-    "SessionEnd": [
-        {
-            "matcher": "",
-            "hooks": [{"type": "command", "command": "chronicle-hook", "async": True}],
-        }
-    ],
-}
+
+def _chronicle_hook_path() -> Path:
+    """Return the installed hook entry point expected by install.sh.
+
+    Resolve lazily so tests and installations that override HOME get the
+    correct user-local path. Claude Code command hooks run outside an
+    interactive shell, so the settings entry must not depend on shell profile
+    PATH mutations.
+    """
+    return Path.home() / ".local" / "bin" / "chronicle-hook"
+
+
+def _chronicle_hooks() -> dict:
+    """Build the canonical Claude Code hook configuration for this user.
+
+    ``args: []`` selects Claude Code's exec form: the absolute executable is
+    spawned directly, with no ``sh -c`` layer and no shell startup files.
+    Matchers are omitted because these lifecycle events should fire on every
+    occurrence; Stop and UserPromptSubmit do not use matcher filtering.
+    """
+    command = str(_chronicle_hook_path())
+    sync_hook = {
+        "type": "command",
+        "command": command,
+        "args": [],
+        "statusMessage": "Loading chronicle context...",
+    }
+    async_hook = {
+        "type": "command",
+        "command": command,
+        "args": [],
+        "async": True,
+    }
+    return {
+        "SessionStart": [{"hooks": [sync_hook]}],
+        "Stop": [{"hooks": [dict(async_hook)]}],
+        "UserPromptSubmit": [{"hooks": [dict(async_hook)]}],
+        "SessionEnd": [{"hooks": [dict(async_hook)]}],
+    }
 
 
 def _invalid_hooks_error(path: Path, detail: str) -> None:
@@ -90,8 +98,8 @@ def install_hooks(settings_path: str):
     # Merge Chronicle hooks into existing hooks without replacing user entries.
     # For each event, remove only the Chronicle hook entries from existing
     # matcher groups, preserve unrelated user hooks, then append Chronicle's
-    # canonical matcher group.
-    for event_name, chronicle_matchers in CHRONICLE_HOOKS.items():
+    # canonical group.
+    for event_name, chronicle_matchers in _chronicle_hooks().items():
         existing = hooks.get(event_name, [])
         if existing is None:
             existing = []
@@ -131,15 +139,27 @@ def install_hooks(settings_path: str):
 def _is_chronicle_hook_command(cmd) -> bool:
     """True if a hook command invokes chronicle-hook.
 
-    Accepts literal 'chronicle-hook' as well as absolute paths like
-    '/Users/ehz/.local/bin/chronicle-hook', and tolerates trailing flags
-    ('chronicle-hook --foo'). Splits on whitespace, takes the first token,
-    compares basename.
+    Accepts direct-exec absolute paths (including paths containing spaces), the
+    legacy bare command, and shell-form commands with quoting or trailing flags.
+    Malformed shell text is treated as unrelated instead of making install or
+    uninstall fail.
     """
     if not isinstance(cmd, str) or not cmd.strip():
         return False
-    first = cmd.strip().split(None, 1)[0]
-    return os.path.basename(first) == "chronicle-hook"
+
+    command = cmd.strip()
+
+    # Exec form stores the executable path as the entire command string. Check
+    # it before shell tokenization so '/home/First Last/.../chronicle-hook' is
+    # recognized even though its spaces are not shell quoting.
+    if os.path.basename(command) == "chronicle-hook":
+        return True
+
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return False
+    return bool(tokens) and os.path.basename(tokens[0]) == "chronicle-hook"
 
 
 def uninstall_hooks(settings_path: str, dry_run: bool = False) -> int:
