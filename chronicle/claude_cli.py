@@ -1,13 +1,17 @@
 """Central Claude CLI subprocess management.
 
-Solves three cross-cutting concerns:
+Solves four cross-cutting concerns:
 
 1. PATH resolution — finds the `claude` binary even when the daemon runs
    under launchd's minimal PATH. Uses shutil.which + fallback directories.
 2. Subprocess env — strips auth/endpoint env vars so subscription routing
    always wins over API-key or proxy-gateway routing
    (anthropics/claude-code#2051).
-3. Error classification — distinguishes INFRA (missing binary, perm
+3. Invocation isolation — safe mode prevents a programmatic summary from
+   loading the user's hooks, CLAUDE.md, plugins, skills, MCP servers, or other
+   customizations; built-in tools are disabled because Chronicle only needs
+   the transcript supplied on stdin.
+4. Error classification — distinguishes INFRA (missing binary, perm
    denied, auth failure), TRANSIENT/PARSE retriable failures, and
    deterministic CONTEXT/STRUCTURED_OUTPUT terminal failures. Retry
    accounting only penalizes non-INFRA.
@@ -40,6 +44,11 @@ _STRIP_ENV_VARS = frozenset({
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
 })
+
+_SAFE_MODE_UPDATE_MESSAGE = (
+    "Chronicle requires a current Claude Code version with --safe-mode support; "
+    "run `claude update` (or update through your package manager) and retry."
+)
 
 
 def _fallback_bin_dirs() -> list[Path]:
@@ -239,6 +248,17 @@ def _classify_claude_error(message: str) -> ErrorKind:
     return ErrorKind.TRANSIENT
 
 
+def _safe_mode_is_unsupported(message: str) -> bool:
+    """Detect CLI parse errors caused by an old Claude Code binary."""
+    m = (message or "").lower()
+    return "--safe-mode" in m and any(token in m for token in (
+        "unknown option",
+        "unknown argument",
+        "unrecognized option",
+        "unexpected argument",
+    ))
+
+
 async def spawn_claude(
     prompt: str,
     *,
@@ -248,7 +268,12 @@ async def spawn_claude(
     json_schema: Optional[dict] = None,
     timeout: Optional[float] = None,
 ) -> ClaudeResult:
-    """Invoke `claude -p` and return a classified result.
+    """Invoke isolated `claude -p` and return a classified result.
+
+    Safe mode disables user/project customizations (including Chronicle's own
+    hooks), and ``--tools ""`` prevents transcript content from causing file or
+    command side effects. Authentication and model selection still work through
+    the user's normal Claude Code login.
 
     No wall-clock limit by default (timeout=None): the call runs until claude
     exits or the awaiting task is cancelled. Ctrl-C (asyncio.run) and daemon
@@ -278,7 +303,10 @@ async def spawn_claude(
         )
 
     args = [
-        str(claude_bin), "-p",
+        str(claude_bin),
+        "--safe-mode",
+        "-p",
+        "--tools", "",
         "--output-format", "json",
         "--no-session-persistence",
     ]
@@ -358,6 +386,11 @@ async def spawn_claude(
     if proc.returncode != 0:
         msg = stderr[:300] or stdout[:300] or f"exit {proc.returncode}"
         combined = (stderr + " " + stdout).lower()
+        if _safe_mode_is_unsupported(combined):
+            return ClaudeResult(
+                error_kind=ErrorKind.INFRA,
+                error_message=_SAFE_MODE_UPDATE_MESSAGE,
+            )
         infra_hints = (
             "command not found", "no such file",
             "not authenticated", "authentication required",
