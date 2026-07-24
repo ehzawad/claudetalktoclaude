@@ -9,11 +9,10 @@ Responsibilities:
 Designed to work under both macOS Tahoe (launchd) and Ubuntu 24.04 LTS
 (systemd --user). Status probes (`service_running`, `service_installed`,
 `mode_drift_warnings`) are best-effort — missing `launchctl`/`systemctl`
-is reported as not running rather than raising. Install / bootstrap surfaces
-its failure: `install_service()` returns False when the manager rejected
-the job, and `install-daemon` rolls the config mode back so `chronicle
-doctor` doesn't lie about intent. The processing lock is the correctness
-boundary across all code paths.
+is reported as not running rather than raising. Install / bootstrap failures
+are promoted to RuntimeError so `install-daemon` exits non-zero and rolls the
+config mode back instead of reporting a false success. The processing lock is
+the correctness boundary across all code paths.
 
 Service files always include a full PATH in EnvironmentVariables /
 Environment="PATH=..." so the daemon can find `claude` even when
@@ -73,6 +72,17 @@ def _describe_process_failure(res: subprocess.CompletedProcess, prefix: str) -> 
     return f"{prefix} (exit {res.returncode})"
 
 
+def _manager_runtime_error(manager: str, error: OSError) -> RuntimeError:
+    detail = f"{manager} unavailable: {error}"
+    if manager == "systemctl":
+        detail += (
+            ". Background mode requires a systemd user session; on WSL2, "
+            "enable systemd or keep Chronicle in foreground mode."
+        )
+    _set_last_service_error(detail)
+    return RuntimeError(detail)
+
+
 def _chronicle_binary() -> str:
     """Absolute path to the chronicle entry point used in launchd / systemd unit files.
 
@@ -93,7 +103,7 @@ def _chronicle_binary() -> str:
         raise RuntimeError(
             f"chronicle binary not found at {candidate}; rerun install.sh or `chronicle update` first."
         ) from e
-    if not resolved.is_file():
+    if not resolved.is_file() or not os.access(resolved, os.X_OK):
         raise RuntimeError(
             f"chronicle binary path {resolved} is not an executable file."
         )
@@ -166,6 +176,8 @@ def _mac_is_loaded() -> bool:
 
 def _mac_install() -> bool:
     """Write plist and (re)bootstrap. Returns True if launchd accepted the job."""
+    if not shutil.which("launchctl"):
+        raise FileNotFoundError("launchctl was not found on PATH")
     _MAC_PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
     _MAC_PLIST_PATH.write_text(_mac_plist_contents())
     _mac_bootout()
@@ -217,6 +229,8 @@ def _linux_is_active() -> bool:
 
 def _linux_install() -> bool:
     """Write unit and `enable --now`. Returns True if systemctl reports success."""
+    if not shutil.which("systemctl"):
+        raise FileNotFoundError("systemctl was not found on PATH")
     _LINUX_UNIT_PATH.parent.mkdir(parents=True, exist_ok=True)
     _LINUX_UNIT_PATH.write_text(_linux_unit_contents())
     reload_res = _linux_run(["systemctl", "--user", "daemon-reload"])
@@ -231,10 +245,14 @@ def _linux_install() -> bool:
 
 
 def _linux_uninstall() -> None:
-    _linux_run(["systemctl", "--user", "disable", "--now", _LINUX_UNIT])
+    # Removing the unit file must still work in minimal WSL/container setups
+    # where systemctl is absent. If it exists, disable/reload best-effort.
+    if shutil.which("systemctl"):
+        _linux_run(["systemctl", "--user", "disable", "--now", _LINUX_UNIT])
     if _LINUX_UNIT_PATH.exists():
         _LINUX_UNIT_PATH.unlink()
-    _linux_run(["systemctl", "--user", "daemon-reload"])
+    if shutil.which("systemctl"):
+        _linux_run(["systemctl", "--user", "daemon-reload"])
 
 
 # ---------- Public API ----------
@@ -250,31 +268,46 @@ def platform_key() -> str:
 def install_service() -> bool:
     """Install and start the service on this platform. Idempotent.
 
-    Returns True if the service manager accepted the job. False means
-    the file was written but daemon-reload, bootstrap, or enable failed —
-    caller should surface this to the user via `chronicle doctor`.
+    Returns True only when the service manager accepted the job. Missing
+    service-manager executables and non-zero manager results raise RuntimeError
+    so the CLI exits non-zero and rolls processing_mode back to foreground.
     """
     _set_last_service_error(None)
     p = platform_key()
-    if p == "macos":
-        return _mac_install()
-    if p == "linux":
-        return _linux_install()
-    raise RuntimeError(
-        f"Unsupported platform {sys.platform}; run `chronicle daemon` manually."
-    )
+    try:
+        if p == "macos":
+            accepted = _mac_install()
+        elif p == "linux":
+            accepted = _linux_install()
+        else:
+            raise RuntimeError(
+                f"Unsupported platform {sys.platform}; run `chronicle daemon` manually."
+            )
+    except OSError as e:
+        manager = "launchctl" if p == "macos" else "systemctl"
+        raise _manager_runtime_error(manager, e) from e
+
+    if not accepted:
+        raise RuntimeError(
+            last_service_error() or "service manager did not accept the Chronicle daemon"
+        )
+    return True
 
 
 def uninstall_service() -> None:
     """Stop and remove the service on this platform. Idempotent."""
     p = platform_key()
-    if p == "macos":
-        _mac_uninstall()
-    elif p == "linux":
-        _linux_uninstall()
-    else:
-        # Nothing to uninstall on unknown platform
-        return
+    try:
+        if p == "macos":
+            _mac_uninstall()
+        elif p == "linux":
+            _linux_uninstall()
+        else:
+            # Nothing to uninstall on unknown platform
+            return
+    except OSError as e:
+        manager = "launchctl" if p == "macos" else "systemctl"
+        raise _manager_runtime_error(manager, e) from e
 
 
 def service_installed() -> bool:
